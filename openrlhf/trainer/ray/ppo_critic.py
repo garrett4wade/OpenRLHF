@@ -75,6 +75,13 @@ class CriticModelRayActor(BasePPORole):
             target_modules=strategy.args.target_modules,
             ds_config=strategy.get_ds_train_config(is_actor=False),
         )
+        self.critic_hf_config = critic.config
+        def _count_params(model):
+            return sum([
+                    p.ds_numel if hasattr(p, "ds_tensor") else p.numel()
+                    for p in model.parameters()
+                ])
+        self.critic_hf_config._num_params = _count_params(critic)
         strategy.print(critic)
         strategy.print("reward normalization status: {}".format(strategy.args.normalize_reward))
         strategy.print("mean: {}, std {}".format(critic.mean, critic.std))
@@ -96,7 +103,7 @@ class CriticModelRayActor(BasePPORole):
 
         if args.gradient_checkpointing:
             critic.gradient_checkpointing_enable(
-                gradient_checkpointing_kwargs={"use_reentrant": args.gradient_checkpointing_use_reentrant}
+                gradient_checkpointing_kwargs={}
             )
 
         # prepare models/optimizers...
@@ -127,6 +134,9 @@ class CriticModelRayActor(BasePPORole):
             value_clip=args.value_clip,
             eps_clip=args.eps_clip,
         )
+    
+    def get_hf_config(self):
+        return self.critic_hf_config
 
     def forward(
         self,

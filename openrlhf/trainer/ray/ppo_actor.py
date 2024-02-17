@@ -192,7 +192,7 @@ class ActorModelRayActor(BasePPORole):
 
         if args.gradient_checkpointing:
             actor.gradient_checkpointing_enable(
-                gradient_checkpointing_kwargs={"use_reentrant": args.gradient_checkpointing_use_reentrant}
+                gradient_checkpointing_kwargs={}
             )
 
         # prepare models/optimizers...
@@ -305,6 +305,7 @@ class ActorModelRayActor(BasePPORole):
             # fro GPT generation
             do_sample=True,
             max_new_tokens=args.generate_max_len,
+            min_new_tokens=args.generate_max_len,  # NOTE: we fixed the number of tokens to generate
             max_length=args.max_len,
             temperature=1,
             top_p=args.top_p,
@@ -312,7 +313,16 @@ class ActorModelRayActor(BasePPORole):
             eos_token_id=self.tokenizer.eos_token_id,
         )
 
-        trainer.fit(self.prompts_dataloader, self.pretrain_dataloader, args)
+        def _count_params(model):
+            return sum([
+                    p.ds_numel if hasattr(p, "ds_tensor") else p.numel()
+                    for p in model.parameters()
+                ])
+        critic_hf_config = ray.get(critic_model.get_hf_config.remote())
+        hf_actor_config = self.actor.model.module.config
+        hf_actor_config._num_params = _count_params(self.actor.model.module)
+        trainer.fit(self.prompts_dataloader, self.pretrain_dataloader, args, hf_actor_config=hf_actor_config,
+                    hf_critic_config=critic_hf_config)
 
     def save_model(self):
         args = self.strategy.args
