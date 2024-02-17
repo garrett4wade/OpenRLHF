@@ -2,11 +2,15 @@ import math
 import os.path
 from abc import ABC
 from typing import Any, Callable, Dict, List, Optional, Union
+import multiprocessing as mp
 
 import ray
 import torch
 import torch.nn as nn
 from torch import Tensor
+import torch.distributed
+import pynvml
+import time
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader, DistributedSampler
 from tqdm import tqdm
@@ -16,7 +20,145 @@ from openrlhf.models.utils import masked_mean
 
 from .ppo_utils import AdaptiveKLController, Experience, FixedKLController, NaiveExperienceMaker, NaiveReplayBuffer
 
+import logging
 
+LOG_FORMAT = "%(asctime)s.%(msecs)03d %(name)s %(levelname)s: %(message)s"
+DATE_FORMAT = "%Y%m%d-%H:%M:%S"
+
+logging.basicConfig(format=LOG_FORMAT, datefmt=DATE_FORMAT, level=os.environ.get("LOGLEVEL", "INFO"))
+logger = logging.getLogger("DeepSpeed Slurm Launch")
+writer = None
+
+def gpu_utilization_monitor(gpu_idx:int, ttl:float):
+    pynvml.nvmlInit()
+    tik = time.time()
+    while time.time() - tik < ttl:
+        handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_idx)
+        utilization = pynvml.nvmlDeviceGetUtilizationRates(handle)
+        memory_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+        total_memory = memory_info.total / (1024 ** 2)  # Convert bytes to megabytes
+        used_memory = memory_info.used / (1024 ** 2)
+        memory_usage_percentage = (used_memory / total_memory) * 100
+        logger.info(f"GPU {gpu_idx}: Compute Utilization - {utilization.gpu}%, Total Memory - {total_memory:.2f}MB, Used Memory - {used_memory:.2f}MB, Memory Usage - {memory_usage_percentage:.2f}%")
+        time.sleep(10)
+    pynvml.nvmlShutdown()
+    
+def get_hf_configs(hf_config):
+    num_layers = getattr(hf_config, "num_hidden_layers",
+                         getattr(hf_config, "n_layer", None))
+    hidden_size = getattr(hf_config, "hidden_size",
+                          getattr(hf_config, "n_embd", None))
+    vocab_size = getattr(hf_config, "vocab_size", None)
+    assert all(
+        (num_layers, hidden_size, vocab_size)
+    ), ("Could not determine number of layers, hidden size, and vocab size of the model", hf_config)
+
+    return num_layers, hidden_size, vocab_size
+
+def calculate_flops(checkpoint_activations_factor, batch_size, seq_length,
+                    hf_config):
+    num_layers, hidden_size, vocab_size = get_hf_configs(hf_config)
+    flops_per_iteration = (24 * checkpoint_activations_factor * batch_size *
+                           seq_length * num_layers * (hidden_size**2)) * (
+                               1.0 + (seq_length / (6.0 * hidden_size)) +
+                               (vocab_size /
+                                (16.0 * num_layers * hidden_size)))
+    return flops_per_iteration
+
+def print_throughput_step3(actor_hf_config, critic_hf_config,
+                           n_actor_gpus, n_critic_gpus,
+                           args,
+                           e2e_time,
+                           gen_exp_time,
+                           train_time,
+                           rank=0):
+    if rank != 0:
+        return
+    max_prompt_len = args.prompt_max_len
+    max_answer_len = args.generate_max_len
+
+    actor_num_layers, actor_hidden_size, actor_vocab_size = get_hf_configs(
+        actor_hf_config)
+    critic_num_layers, critic_hidden_size, critic_vocab_size = get_hf_configs(
+        critic_hf_config)
+
+    seq_length = max_prompt_len + max_answer_len
+    batch_size = args.train_batch_size
+    samples_per_second = batch_size / e2e_time
+
+    actor_checkpoint_activations_factor = 4 if args.gradient_checkpointing else 3
+    critic_checkpoint_activations_factor = 4 if args.gradient_checkpointing else 3
+
+    actor_num_params = actor_hf_config._num_params
+    actor_params_in_billions = actor_num_params / (1e9)
+
+    critic_num_params = critic_hf_config._num_params
+    critic_params_in_billions = critic_num_params / (1e9)
+
+    # Megatron paper's formula to calculate training flops
+
+    actor_train_flops_per_iteration = calculate_flops(
+        actor_checkpoint_activations_factor, batch_size, seq_length,
+        actor_hf_config)
+    critic_train_flops_per_iteration = calculate_flops(
+        critic_checkpoint_activations_factor, batch_size, seq_length,
+        critic_hf_config)
+
+    total_train_flops = actor_train_flops_per_iteration + critic_train_flops_per_iteration
+    actor_train_tflops = actor_train_flops_per_iteration / (train_time * n_actor_gpus *
+                                        (10**12))
+    critic_train_tflops = critic_train_flops_per_iteration/ (train_time * n_critic_gpus *
+                                        (10**12))
+    train_tflops = actor_train_tflops + critic_train_tflops
+
+    gen_bs = args.rollout_batch_size
+
+    # Modified formula for calculating flops in the forward pass only
+    gen_flops_per_iteration = (
+        24 * gen_bs * seq_length * actor_num_layers *
+        (actor_hidden_size**2)) * (
+            1.0 + (seq_length / (6.0 * actor_hidden_size)) +
+            (actor_vocab_size /
+                (16.0 * actor_num_layers * actor_hidden_size)))
+
+    gen_tflops = gen_flops_per_iteration / (gen_exp_time * n_actor_gpus *
+                                            (10**12))
+
+    if actor_hf_config.torch_dtype == torch.float16:
+        num_bytes = 2
+    elif actor_hf_config.torch_dtype == torch.float32:
+        num_bytes = 4
+    else:
+        num_bytes = -1
+
+    pertok_lat = gen_exp_time / max_answer_len
+    gen_bw = 1 / pertok_lat * actor_num_params * num_bytes / 1e9
+
+    generation_batches = (gen_bs // n_actor_gpus // args.micro_rollout_batch_size)
+    total_flops_per_iteration = total_train_flops + gen_flops_per_iteration * generation_batches
+    total_tflops = total_flops_per_iteration / (e2e_time * (n_actor_gpus + n_critic_gpus) *
+                                                (10**12))
+
+    print(
+        f"End-to-End => Latency: {e2e_time:.2f}s, TFLOPs: {total_tflops:.2f}, Samples/sec: {samples_per_second:.2f}, Time/seq {e2e_time/batch_size:.2f}s, Batch Size: {batch_size}, Total Seq. Length: {seq_length}"
+    )
+    print(
+        f"Generation => Latency: {gen_exp_time:.2f}s, Per-token Latency {pertok_lat*1000:.2f} ms, TFLOPs: {gen_tflops:.2f}, BW: {gen_bw if num_bytes > 0 else num_bytes:.2f} GB/sec, Answer Seq. Length: {max_answer_len}"
+    )
+    print(
+        f"Training   => Latency: {train_time:.2f}s, TFLOPs: {train_tflops:.2f}"
+    )
+    actor_param_string = f"{actor_params_in_billions:.3f} B" if actor_params_in_billions != 0 else "NA"
+    critic_param_string = f"{critic_params_in_billions:.3f} B" if critic_params_in_billions != 0 else "NA"
+    print(
+        f"Actor Model Parameters => {actor_param_string}, Critic Model Parameters => {critic_param_string}"
+    )
+
+def _count_params(model):
+    return sum([
+            p.ds_numel if hasattr(p, "ds_tensor") else p.numel()
+            for p in model.parameters()
+        ])
 class PPOTrainer(ABC):
     """
         Trainer for PPO algorithm.
@@ -144,12 +286,34 @@ class PPOTrainer(ABC):
             wandb.define_metric("eval/epoch")
             wandb.define_metric("eval/*", step_metric="eval/epoch", step_sync=True)
 
+        self.gpu_monior_proc = None
+
     def fit(
         self,
         prompts_dataloader,
         pretrain_dataloader,
         args,
+        hf_actor_config=None,
+        hf_critic_config=None,
     ) -> None:
+        # this function will be called in Ray PPO actors
+        # so torch.distributed.get_world_size() will return the number of actors
+        if hasattr(args, "actor_num_nodes"):
+            n_actor_gpus = args.actor_num_nodes * args.actor_num_gpus_per_node
+            n_critic_gpus = args.critic_num_nodes * args.critic_num_gpus_per_node
+        else:
+            hf_actor_config = self.experience_maker.actor.model.module.config
+            hf_actor_config._num_params = _count_params(self.experience_maker.actor.model.module)
+            hf_critic_config = self.experience_maker.critic.module._hf_config
+            hf_critic_config._num_params = _count_params(self.experience_maker.critic)
+            n_actor_gpus = n_critic_gpus = torch.distributed.get_world_size()
+            # launch monitor process for non-ray training
+            if self.gpu_monior_proc is None:
+                self.gpu_monior_proc = mp.Process(target=gpu_utilization_monitor, args=(torch.cuda.current_device(), 3600))
+                self.gpu_monior_proc.start()
+        
+        _step_cnt = 0
+        last_gen_time = last_inf_time = 0
         self.prompts_dataloader = prompts_dataloader
         self.pretrain_dataloader = pretrain_dataloader
 
@@ -165,32 +329,60 @@ class PPOTrainer(ABC):
         for episode in range(args.num_episodes):
             if isinstance(self.prompts_dataloader.sampler, DistributedSampler):
                 self.prompts_dataloader.sampler.set_epoch(episode)
-            pbar = tqdm(
-                range(self.prompts_dataloader.__len__()),
-                desc=f"Episode [{episode + 1}/{args.num_episodes}]",
-                disable=not self.strategy.is_rank_0(),
-            )
+            # pbar = tqdm(
+            #     range(self.prompts_dataloader.__len__()),
+            #     desc=f"Episode [{episode + 1}/{args.num_episodes}]",
+            #     disable=not self.strategy.is_rank_0(),
+            # )
 
+            train_iter_tik = time.perf_counter()
             for rand_prompts in self.prompts_dataloader:
-                experience = self.experience_maker.make_experience(rand_prompts, **self.generate_kwargs)
+                experience, gen_time, inf_time = self.experience_maker.make_experience(rand_prompts, **self.generate_kwargs)
                 # print prompt/answer in each update step
-                if global_step % update_timesteps == 0:
-                    output = self.tokenizer.batch_decode(experience.sequences, skip_special_tokens=True)
-                    self.strategy.print(output[0])
+                # if global_step % update_timesteps == 0:
+                #     output = self.tokenizer.batch_decode(experience.sequences, skip_special_tokens=True)
+                #     self.strategy.print(output[0])
+                last_gen_time += gen_time
+                last_inf_time += inf_time
                 self.replay_buffer.append(experience)
 
                 if global_step % update_timesteps == 0:
                     torch.cuda.empty_cache()
+                    ts = time.perf_counter()
                     self.replay_buffer.normalize("advantages", self.strategy)
                     status = self.ppo_train()
+                    _step_cnt += 1
                     self.replay_buffer.clear()
                     torch.cuda.empty_cache()
                     self.kl_ctl.update(status["kl"], args.rollout_batch_size)
                     # logs/checkpoints
-                    self.save_logs_and_checkpoints(args, global_step // update_timesteps, pbar, status)
+                    # self.save_logs_and_checkpoints(args, global_step // update_timesteps, pbar, status)
+                    train_time = time.perf_counter() - ts
+                    e2e_time = time.perf_counter() - train_iter_tik
+                    print_throughput_step3(
+                        actor_hf_config=hf_actor_config,
+                        critic_hf_config=hf_critic_config,
+                        n_actor_gpus=n_actor_gpus,
+                        n_critic_gpus=n_critic_gpus,
+                        args=args,
+                        e2e_time=e2e_time,
+                        gen_exp_time=last_gen_time,
+                        train_time=train_time,
+                        rank=torch.distributed.get_rank(),
+                    )
+                    last_gen_time = last_inf_time = 0
+                    train_iter_tik = time.perf_counter()
 
-                pbar.update()
+                # pbar.update()
                 global_step = global_step + 1
+                if _step_cnt >= 20:
+                    if torch.distributed.get_rank() == 0:
+                        print(f">>>>>>>>>>>>>> Benchmarking finishes after {_step_cnt} steps")
+                    if self.gpu_monior_proc is not None:
+                        self.gpu_monior_proc.kill()
+                    return
+        if self.gpu_monior_proc is not None:
+            self.gpu_monior_proc.kill()
 
     def ppo_train(self):
         # replay buffer may be empty at first, we should rebuild at each training

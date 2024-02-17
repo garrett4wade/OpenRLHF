@@ -229,6 +229,7 @@ def _get_critic_model(base_pretrained_model, base_llm_model):
 
         def __init__(self, config: AutoConfig):
             super().__init__(config)
+            self._hf_config = config
             setattr(self, self.base_model_prefix, base_llm_model(config))
 
             self.value_head = nn.Linear(config.hidden_size, 1, bias=False)

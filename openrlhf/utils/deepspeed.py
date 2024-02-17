@@ -80,7 +80,7 @@ class DeepspeedStrategy(ABC):
         # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
         deepspeed.init_distributed(timeout=timeout)
         self.world_size = dist.get_world_size()
-        self.accumulated_gradient = self.train_batch_size // self.micro_train_batch_size // self.world_size
+        self.accumulated_gradient = 1
 
     def create_optimizer(self, model, **kwargs) -> Optimizer:
         if isinstance(model, Actor):

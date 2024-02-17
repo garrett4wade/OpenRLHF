@@ -57,15 +57,39 @@ class _WorkerWrap(Worker):
         # if empty_cache:
         #     torch.cuda.empty_cache()
 
+import pynvml
+import time
+import multiprocessing as mp
+LOG_FORMAT = "%(asctime)s.%(msecs)03d %(name)s %(levelname)s: %(message)s"
+DATE_FORMAT = "%Y%m%d-%H:%M:%S"
+logging.basicConfig(format=LOG_FORMAT, datefmt=DATE_FORMAT, level=os.environ.get("LOGLEVEL", "INFO"))
+logger = logging.getLogger("DeepSpeed Slurm Launch")
+
+def gpu_utilization_monitor(name, gpu_idx:int, ttl:float):
+    pynvml.nvmlInit()
+    tik = time.time()
+    while time.time() - tik < ttl:
+        handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_idx)
+        utilization = pynvml.nvmlDeviceGetUtilizationRates(handle)
+        memory_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+        total_memory = memory_info.total / (1024 ** 2)  # Convert bytes to megabytes
+        used_memory = memory_info.used / (1024 ** 2)
+        memory_usage_percentage = (used_memory / total_memory) * 100
+        logger.info(f"Model {name} GPU {gpu_idx}: Compute Utilization - {utilization.gpu}%, Total Memory - {total_memory:.2f}MB, Used Memory - {used_memory:.2f}MB, Memory Usage - {memory_usage_percentage:.2f}%")
+        time.sleep(10)
+    pynvml.nvmlShutdown()
 
 @ray.remote
 class LLMRayActor:
-    def __init__(self, *args, **kwargs):
+    def __init__(self, idx, *args, **kwargs):
         from vllm.worker import worker
 
         worker.Worker = _WorkerWrap
 
         self.llm = LLM(*args, **kwargs)
+        
+        self._gpu_monitor_proc = mp.Process(target=gpu_utilization_monitor, args=(f"vLLM", idx, 7200))
+        self._gpu_monitor_proc.start()
 
     def generate(self, *args, **kwargs):
         return self.llm.generate(*args, **kwargs)

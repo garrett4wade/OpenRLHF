@@ -116,11 +116,15 @@ class NaiveExperienceMaker(ABC):
         self.reward_model.eval()
 
         # generate seq
+        gs = time.perf_counter()
         inputs = self.tokenize_fn(prompts, self.prompt_max_len, device="cuda")
         sequences, attention_mask, action_mask = self.actor.generate(**inputs, **generate_kwargs)
+        torch.cuda.synchronize()
+        ge = time.perf_counter()
         num_actions = action_mask.size(1)
 
         # log probs
+        infs = time.perf_counter()
         action_log_probs = self.actor(sequences, num_actions, attention_mask)
 
         # init log probs
@@ -146,6 +150,8 @@ class NaiveExperienceMaker(ABC):
             generate_kwargs["gamma"],
             generate_kwargs["lambd"],
         )
+        torch.cuda.synchronize()
+        infe = time.perf_counter()
 
         info = {
             "kl": masked_mean(kl, action_mask, dim=-1),
@@ -167,7 +173,7 @@ class NaiveExperienceMaker(ABC):
             attention_mask,
             action_mask,
             info,
-        )
+        ), ge-gs, infe-infs
 
     @torch.no_grad()
     def get_advantages_and_returns(
@@ -233,6 +239,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             if self.vllm_engines is None
             else self._generate_vllm(prompts, **generate_kwargs)
         )
+        torch.cuda.synchronize()
         generate_time = time.time() - start
 
         num_actions = action_mask.size(1)
@@ -243,6 +250,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         )
 
         # init log probs
+        infs = time.time()
         base_action_log_probs_ref = self.initial_model.forward.remote(sequences_cpu, num_actions, attention_mask_cpu)
 
         # values
@@ -282,6 +290,8 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             generate_kwargs["gamma"],
             generate_kwargs["lambd"],
         )
+        torch.cuda.synchronize()
+        inf_time = time.time() - infs
 
         info = {
             "kl": masked_mean(kl, action_mask, dim=-1),
@@ -314,7 +324,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         self._ref = self.critic.append.remote(experience_cpu)
 
         self.actor.train()  # reset model state
-        return experience
+        return experience, generate_time, inf_time
 
     def _generate_local(self, prompts: List[str], **kwargs) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         inputs = self.tokenize_fn(prompts, self.prompt_max_len, device="cuda")

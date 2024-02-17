@@ -5,20 +5,39 @@ from typing import Callable, List, Optional, Type
 
 import ray
 import torch
+import pynvml
+import time
+import multiprocessing as mp
 from ray.util.placement_group import PlacementGroup, placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from openrlhf.models import Actor, get_llm_for_sequence_regression
 from openrlhf.utils import DeepspeedStrategy, get_tokenizer
 
+LOG_FORMAT = "%(asctime)s.%(msecs)03d %(name)s %(levelname)s: %(message)s"
+DATE_FORMAT = "%Y%m%d-%H:%M:%S"
 
 class DistributedTorchRayActor:
-    def __init__(self, world_size, rank, local_rank, master_addr, master_port):
-        logging.basicConfig(
-            format="%(asctime)s %(levelname)-8s %(message)s",
-            level=logging.INFO,
-            datefmt="%Y-%m-%d %H:%M:%S",
-        )
+    def __init__(self, name, world_size, rank, local_rank, master_addr, master_port):
+        def gpu_utilization_monitor(name, logger, gpu_idx:int, ttl:float):
+            pynvml.nvmlInit()
+            tik = time.time()
+            while time.time() - tik < ttl:
+                handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_idx)
+                utilization = pynvml.nvmlDeviceGetUtilizationRates(handle)
+                memory_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                total_memory = memory_info.total / (1024 ** 2)  # Convert bytes to megabytes
+                used_memory = memory_info.used / (1024 ** 2)
+                memory_usage_percentage = (used_memory / total_memory) * 100
+                logger.info(f"Model {name} GPU {gpu_idx}: Compute Utilization - {utilization.gpu}%, Total Memory - {total_memory:.2f}MB, Used Memory - {used_memory:.2f}MB, Memory Usage - {memory_usage_percentage:.2f}%")
+                time.sleep(10)
+            pynvml.nvmlShutdown()
+
+        self.name = name
+        logging.basicConfig(format=LOG_FORMAT, datefmt=DATE_FORMAT, level=os.environ.get("LOGLEVEL", "INFO"))
+        logger = logging.getLogger("DeepSpeed Slurm Launch")
+        self.monitor_proc = mp.Process(target=gpu_utilization_monitor, args=(self.name, logger, rank, 3600))
+        self.monitor_proc.start()
         self._world_size = world_size
         self._rank = rank
         self._local_rank = local_rank
@@ -132,6 +151,7 @@ class PPORayActorGroup:
 
     def __init__(
         self,
+        name,
         num_nodes,
         num_gpus_per_node,
         ray_actor_type: Type[BasePPORole],
@@ -141,6 +161,7 @@ class PPORayActorGroup:
         self._num_nodes = num_nodes
         self._num_gpus_per_node = num_gpus_per_node
         self.ray_actor_type = ray_actor_type
+        self._name = name
         self._initiate_actors(pg, num_gpus_per_actor)
 
     def _initiate_actors(self, pg, num_gpus_per_actor):
@@ -159,11 +180,11 @@ class PPORayActorGroup:
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
                     placement_group=pg, placement_group_bundle_index=0
                 ),
-            ).remote(world_size, 0, 0, None, None)
+            ).remote(self._name, world_size, 0, 0, None, None)
         else:
             master_actor = self.ray_actor_type.options(
                 num_cpus=num_gpus_per_actor, num_gpus=num_gpus_per_actor
-            ).remote(world_size, 0, 0, None, None)
+            ).remote(self._name, world_size, 0, 0, None, None)
         self._actor_handlers = [master_actor]
 
         # Create worker actors
@@ -179,11 +200,11 @@ class PPORayActorGroup:
                             placement_group=pg,
                             placement_group_bundle_index=rank // self._num_gpus_per_node,
                         ),
-                    ).remote(world_size, rank, local_rank, master_addr, master_port)
+                    ).remote(self._name, world_size, rank, local_rank, master_addr, master_port)
                 else:
                     worker_actor = self.ray_actor_type.options(
                         num_cpus=num_gpus_per_actor, num_gpus=num_gpus_per_actor
-                    ).remote(world_size, rank, local_rank, master_addr, master_port)
+                    ).remote(self._name, world_size, rank, local_rank, master_addr, master_port)
                 self._actor_handlers.append(worker_actor)
 
     def async_init_model_from_pretrained(
