@@ -11,11 +11,11 @@ ray job submit --address="http://127.0.0.1:8265" \
     --actor_num_gpus_per_node 4 \
     --pretrain /lustre/public/pretrained_model_weights/Llama-2-7b-hf \
     --reward_pretrain /lustre/public/pretrained_model_weights/Llama-2-7b-hf \
-    --micro_train_batch_size 32 \
-    --critic_micro_train_batch_size 64 \
-    --train_batch_size 512 \
-    --micro_rollout_batch_size 128 \
-    --rollout_batch_size 512 \
+    --micro_train_batch_size 24 \
+    --critic_micro_train_batch_size 48 \
+    --train_batch_size 384 \
+    --micro_rollout_batch_size 96 \
+    --rollout_batch_size 384 \
     --prompt_max_len 256 \
     --generate_max_len 256 \
     --zero_stage 2 \

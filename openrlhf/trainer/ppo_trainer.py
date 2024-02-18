@@ -375,7 +375,7 @@ class PPOTrainer(ABC):
 
                 # pbar.update()
                 global_step = global_step + 1
-                if _step_cnt >= 20:
+                if _step_cnt >= 10:
                     if torch.distributed.get_rank() == 0:
                         print(f">>>>>>>>>>>>>> Benchmarking finishes after {_step_cnt} steps")
                     if self.gpu_monior_proc is not None:
