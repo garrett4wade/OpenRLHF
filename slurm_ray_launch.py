@@ -240,53 +240,58 @@ def ray_cluster_cmd(expr_name, trial_name, worker_type):
     )
 
 
-def _launch_remote_ray_cluster(
-    sched: scheduler.client.SchedulerClient,
-    expr_name: str,
-    trial_name: str,
-    sch_cfg: Scheduling,
-    environs: Dict[str, str],
-    image_name: Optional[str] = "llm/llm-openrlhf",
-) -> List[str]:
-    job_environs = {**environs, **sch_cfg.env_vars}
-    cmd = ray_cluster_cmd(
-        expr_name,
-        trial_name,
-        worker_type=WORKER_TYPE,
+def main_ray_driver(args):
+    ray_port = args.ray_port
+    # launch ray cluster head
+    ray_flags = [
+        f"--port={ray_port}",
+        "--head",
+        f"--temp-dir={os.path.join(LOG_ROOT, args.experiment_name, args.trial_name)}",
+    ]
+    if args.mode == "slurm":
+        ray_flags.extend(
+            [
+                f"--num-cpus=0",
+                f"--num-gpus=0",
+            ]
+        )
+    cmd = f"ray start {' '.join(ray_flags)}"
+    output = subprocess.check_output(cmd, shell=True).decode("ascii")
+    logger.info("Successfully launched ray cluster head.")
+
+    pattern = r"ray start --address='(\d+\.\d+\.\d+\.\d+:\d+)'"
+    match = re.search(pattern, output)
+    if match:
+        addr = match.group(1)
+        logger.info("Found ray address: '%s'", addr)
+    else:
+        raise RuntimeError(f"Address not found in ray start output: {output}.")
+    ray_addr_name = base.names.ray_cluster(args.experiment_name, args.trial_name, "address")
+    base.name_resolve.add(ray_addr_name, addr, delete_on_exit=True, keepalive_ttl=500)
+
+    # For slurm model, launch the Ray cluster via slurm command.
+    ngpus, _, _ = get_ngpus_and_nodelist_from_model_size(
+        args.model_size, args.colocate_actor_critic, args.colocate_ref_rew
     )
 
-    logger.debug(f"Scheduling Ray cluster...")
-
-    nodelist = sch_cfg.nodelist
-    exclude = sch_cfg.exclude
-    node_type = sch_cfg.node_type
-    container_image = image_name or sch_cfg.container_image
-
-    job = sched.submit_array(
-        worker_type=WORKER_TYPE,
-        cmd=cmd,
-        count=sch_cfg.count,
-        cpu=sch_cfg.cpu,
-        gpu=sch_cfg.gpu,
-        gpu_type=sch_cfg.gpu_type,
-        mem=sch_cfg.mem,
-        container_image=container_image,
-        node_type=node_type,
-        nodelist=nodelist,
-        exclude=exclude,
-        env_vars=job_environs,
-        hostfile=True,
-        multiprog=True,
-        begin=sch_cfg.begin,
-        deadline=sch_cfg.deadline,
-        time_limit=sch_cfg.time_limit,
+    controller = RayController(
+        experiment_name=args.experiment_name,
+        trial_name=args.trial_name,
+        local_mode=args.mode == "local",
+        ray_cluster_count=None if args.mode == "local" else ngpus,
+        driver_cmd=driver_cmd(args),
     )
-    return job
+    try:
+        controller.start()
+    except (KeyboardInterrupt, Exception) as e:
+        subprocess.check_output(f"ray stop", shell=True)
+        raise e
+    subprocess.check_output(f"ray stop", shell=True)
 
 
-def main(args):
+def main_start(args):
     image_name = "llm/llm-openrlhf"
-    ray_port = get_random_port()
+    args.ray_port = ray_port = get_random_port()
 
     trial_name = args.trial_name
     expr_name = args.experiment_name
@@ -307,63 +312,81 @@ def main(args):
         raise e
     logger.info(f"Resetting name resolving repo... Done.")
 
-    # launch ray cluster head
-    ray_flags = [
-        f"--port={ray_port}",
-        "--head",
-        f"--temp-dir={os.path.join(LOG_ROOT, args.experiment_name, args.trial_name)}",
-    ]
-    if args.mode == "slurm":
-        ray_flags.extend(
+    if args.mode == "local":
+        main_ray_driver(args)
+    else:
+        remote_driver_cmd = " ".join(
             [
-                f"--num-cpus=0",
-                f"--num-gpus=0",
+                "python3",
+                "slurm_ray_launch.py",
+                "driver",
+                f"-e {args.experiment_name}",
+                f"-f {args.trial_name}",
+                f"--model_size {args.model_size}",
+                f"--mode {args.mode}",
+                f"--vllm_num_engines {args.vllm_num_engines}",
+                f"--per_device_train_batch_size {args.per_device_train_batch_size}",
+                f"--per_device_gen_batch_size {args.per_device_gen_batch_size}",
+                f"--zero_stage {args.zero_stage}",
+                f"--offload" if args.offload else "",
+                f"--seqlen {args.seqlen}",
+                "--colocate_ref_rew" if args.colocate_ref_rew else "",
+                "--colocate_actor_critic" if args.colocate_actor_critic else "",
             ]
         )
-    cmd = f"ray start {' '.join(ray_flags)}"
-    output = subprocess.check_output(cmd, shell=True).decode("ascii")
-    logger.info
-    logger.info("Successfully launched ray cluster head.")
-
-    pattern = r"ray start --address='(\d+\.\d+\.\d+\.\d+:\d+)'"
-    match = re.search(pattern, output)
-    if match:
-        addr = match.group(1)
-        logger.info("Found ray address: '%s'", addr)
-    else:
-        raise RuntimeError(f"Address not found in ray start output: {output}.")
-    ray_addr_name = base.names.ray_cluster(args.experiment_name, args.trial_name, "address")
-    base.name_resolve.add(ray_addr_name, addr, delete_on_exit=True, keepalive_ttl=500)
-
-    # For slurm model, launch the Ray cluster via slurm command.
-    ngpus, _, _ = get_ngpus_and_nodelist_from_model_size(
-        args.model_size, args.colocate_actor_critic, args.colocate_ref_rew
-    )
-    if args.mode == "slurm":
-        _launch_remote_ray_cluster(
-            sched,
-            args.experiment_name,
-            args.trial_name,
-            sch_cfg=Scheduling(count=ngpus),
-            environs=base_environs,
-            image_name=image_name,
+        sched.submit_array(
+            worker_type="ctl",
+            cmd=remote_driver_cmd,
+            count=1,
+            cpu=4,
+            gpu=0,
+            mem=32 * 1024,
+            env_vars=base_environs,
+            container_image=image_name,
+            time_limit=CONTROLLER_TIME_LIMIT,
+        )
+        ngpus, _, _ = get_ngpus_and_nodelist_from_model_size(
+            args.model_size, args.colocate_actor_critic, args.colocate_ref_rew
+        )
+        sch_cfg = Scheduling(count=ngpus)
+        job_environs = {**base_environs, **sch_cfg.env_vars}
+        cmd = ray_cluster_cmd(
+            expr_name,
+            trial_name,
+            worker_type=WORKER_TYPE,
         )
 
-    controller = RayController(
-        experiment_name=args.experiment_name,
-        trial_name=args.trial_name,
-        local_mode=args.mode == "local",
-        ray_cluster_count=None if args.mode == "local" else ngpus,
-        driver_cmd=driver_cmd(args),
-    )
-    try:
-        controller.start()
-    except (KeyboardInterrupt, Exception) as e:
-        sched.stop_all()
-        subprocess.check_output(f"ray stop", shell=True)
-        raise e
-    sched.stop_all()
-    subprocess.check_output(f"ray stop", shell=True)
+        logger.debug(f"Scheduling Ray cluster...")
+
+        nodelist = sch_cfg.nodelist
+        exclude = sch_cfg.exclude
+        node_type = sch_cfg.node_type
+        container_image = image_name or sch_cfg.container_image
+
+        sched.submit_array(
+            worker_type=WORKER_TYPE,
+            cmd=cmd,
+            count=sch_cfg.count,
+            cpu=sch_cfg.cpu,
+            gpu=sch_cfg.gpu,
+            gpu_type=sch_cfg.gpu_type,
+            mem=sch_cfg.mem,
+            container_image=container_image,
+            node_type=node_type,
+            nodelist=nodelist,
+            exclude=exclude,
+            env_vars=job_environs,
+            hostfile=True,
+            multiprog=True,
+            begin=sch_cfg.begin,
+            deadline=sch_cfg.deadline,
+            time_limit=sch_cfg.time_limit,
+        )
+        try:
+            sched.wait()
+        except (KeyboardInterrupt, scheduler.client.JobException, TimeoutError) as e:
+            sched.stop_all()
+            raise e
 
 
 def get_path_from_model_size(model_size: int):
@@ -405,19 +428,40 @@ def get_ngpus_and_nodelist_from_model_size(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--experiment_name", "-e", type=str, required=True)
-    parser.add_argument("--trial_name", "-f", type=str, required=True)
-    parser.add_argument("--mode", default="slurm", choices=["local", "slurm"])
+    subparsers = parser.add_subparsers(dest="cmd", help="sub-command help")
+    subparsers.required = True
 
-    parser.add_argument("--model_size", type=int, choices=[7, 13, 34, 70], required=True)
-    parser.add_argument("--vllm_num_engines", type=int, default=0)
-    parser.add_argument("--colocate_ref_rew", action="store_true")
-    parser.add_argument("--colocate_actor_critic", action="store_true")
-    parser.add_argument("--per_device_train_batch_size", type=int, default=4)
-    parser.add_argument("--per_device_gen_batch_size", type=int, default=4)
-    parser.add_argument("--zero_stage", type=int, default=2)
-    parser.add_argument("--offload", action="store_true")
-    parser.add_argument("--seqlen", type=int, default=256)
+    subparser = subparsers.add_parser("start", help="launch ray cluster and run workers")
+    subparser.add_argument("--experiment_name", "-e", type=str, required=True)
+    subparser.add_argument("--trial_name", "-f", type=str, required=True)
+    subparser.add_argument("--mode", default="slurm", choices=["local", "slurm"])
+
+    subparser.add_argument("--model_size", type=int, choices=[7, 13, 34, 70], required=True)
+    subparser.add_argument("--vllm_num_engines", type=int, default=0)
+    subparser.add_argument("--colocate_ref_rew", action="store_true")
+    subparser.add_argument("--colocate_actor_critic", action="store_true")
+    subparser.add_argument("--per_device_train_batch_size", type=int, default=4)
+    subparser.add_argument("--per_device_gen_batch_size", type=int, default=4)
+    subparser.add_argument("--zero_stage", type=int, default=2)
+    subparser.add_argument("--offload", action="store_true")
+    subparser.add_argument("--seqlen", type=int, default=256)
+    subparser.set_defaults(func=main_start)
+
+    subparser = subparsers.add_parser("driver", help="launch ray cluster and run workers")
+    subparser.add_argument("--experiment_name", "-e", type=str, required=True)
+    subparser.add_argument("--trial_name", "-f", type=str, required=True)
+    subparser.add_argument("--mode", default="slurm", choices=["local", "slurm"])
+
+    subparser.add_argument("--model_size", type=int, choices=[7, 13, 34, 70], required=True)
+    subparser.add_argument("--vllm_num_engines", type=int, default=0)
+    subparser.add_argument("--colocate_ref_rew", action="store_true")
+    subparser.add_argument("--colocate_actor_critic", action="store_true")
+    subparser.add_argument("--per_device_train_batch_size", type=int, default=4)
+    subparser.add_argument("--per_device_gen_batch_size", type=int, default=4)
+    subparser.add_argument("--zero_stage", type=int, default=2)
+    subparser.add_argument("--offload", action="store_true")
+    subparser.add_argument("--seqlen", type=int, default=256)
+    subparser.set_defaults(func=main_ray_driver)
 
     args = parser.parse_args()
-    main(args)
+    args.func(args)
