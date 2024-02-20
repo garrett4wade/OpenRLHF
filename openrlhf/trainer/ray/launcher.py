@@ -17,27 +17,28 @@ from openrlhf.utils import DeepspeedStrategy, get_tokenizer
 LOG_FORMAT = "%(asctime)s.%(msecs)03d %(name)s %(levelname)s: %(message)s"
 DATE_FORMAT = "%Y%m%d-%H:%M:%S"
 
+logging.basicConfig(format=LOG_FORMAT, datefmt=DATE_FORMAT, level=os.environ.get("LOGLEVEL", "INFO"))
+logger = logging.getLogger("DeepSpeed Slurm Launch")
+
+def gpu_utilization_monitor(name, gpu_idx:int, ttl:float):
+    pynvml.nvmlInit()
+    tik = time.time()
+    while time.time() - tik < ttl:
+        handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_idx)
+        utilization = pynvml.nvmlDeviceGetUtilizationRates(handle)
+        memory_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+        total_memory = memory_info.total / (1024 ** 2)  # Convert bytes to megabytes
+        used_memory = memory_info.used / (1024 ** 2)
+        memory_usage_percentage = (used_memory / total_memory) * 100
+        logger.info(f"Model {name} GPU {gpu_idx}: Compute Utilization - {utilization.gpu}%, Total Memory - {total_memory:.2f}MB, Used Memory - {used_memory:.2f}MB, Memory Usage - {memory_usage_percentage:.2f}%")
+        time.sleep(10)
+    pynvml.nvmlShutdown()
+
 class DistributedTorchRayActor:
     def __init__(self, name, world_size, rank, local_rank, master_addr, master_port):
-        def gpu_utilization_monitor(name, logger, gpu_idx:int, ttl:float):
-            pynvml.nvmlInit()
-            tik = time.time()
-            while time.time() - tik < ttl:
-                handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_idx)
-                utilization = pynvml.nvmlDeviceGetUtilizationRates(handle)
-                memory_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-                total_memory = memory_info.total / (1024 ** 2)  # Convert bytes to megabytes
-                used_memory = memory_info.used / (1024 ** 2)
-                memory_usage_percentage = (used_memory / total_memory) * 100
-                logger.info(f"Model {name} GPU {gpu_idx}: Compute Utilization - {utilization.gpu}%, Total Memory - {total_memory:.2f}MB, Used Memory - {used_memory:.2f}MB, Memory Usage - {memory_usage_percentage:.2f}%")
-                time.sleep(10)
-            pynvml.nvmlShutdown()
-
         self.name = name
-        logging.basicConfig(format=LOG_FORMAT, datefmt=DATE_FORMAT, level=os.environ.get("LOGLEVEL", "INFO"))
-        logger = logging.getLogger("DeepSpeed Slurm Launch")
-        self.monitor_proc = mp.Process(target=gpu_utilization_monitor, args=(self.name, logger, rank, 3600))
-        self.monitor_proc.start()
+        self.monitor_proc = mp.Process(target=gpu_utilization_monitor, args=(self.name, rank, 3600))
+        # self.monitor_proc.start()
         self._world_size = world_size
         self._rank = rank
         self._local_rank = local_rank
@@ -51,6 +52,7 @@ class DistributedTorchRayActor:
         # environment variable for each actor, so always set device to 0
         # os.environ["LOCAL_RANK"] = str(self._local_rank)
         os.environ["LOCAL_RANK"] = "0"
+        torch.cuda.set_device(0)
 
     @staticmethod
     def _get_current_node_ip():
@@ -72,7 +74,11 @@ class BasePPORole(DistributedTorchRayActor):
     def _setup_distributed(self, strategy: DeepspeedStrategy):
         # configure strategy
         self.strategy = strategy
+        print(f">>>>>>>>>>>>>>>>> {os.environ['CUDA_VISIBLE_DEVICES']}")
+        torch.cuda.set_device(0)
+        torch.distributed.init_process_group(backend='nccl')
         strategy.setup_distributed()
+        self.monitor_proc.start()
 
     def init_model_from_pretrained(self, *args, **kwargs):
         raise NotImplementedError()

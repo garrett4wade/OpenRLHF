@@ -355,6 +355,7 @@ class SlurmLaunchInfo:
             f"--container-image={self.container_image}",
             f"--container-mounts={self.container_mounts}",
             f"--container-mount-home",
+            "--container-workdir=/home/fw/sosp-workspace/OpenRLHF",  # HACK
         ]
 
         if self.multiprog:

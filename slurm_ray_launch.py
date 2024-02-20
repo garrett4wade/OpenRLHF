@@ -53,6 +53,7 @@ class RayController:
         trial_name,
         local_mode: bool,
         driver_cmd: str,
+        job_submission_addr: str,
         ray_cluster_count: int = None,
     ):
         # base controller will be lazier initialized when launching workers.
@@ -63,6 +64,8 @@ class RayController:
         self.__ray_cluster_count = ray_cluster_count
 
         self.__driver_cmd = driver_cmd
+
+        self.__job_submission_addr = job_submission_addr
 
     def start(self):
         if not self.__local_mode:
@@ -79,18 +82,12 @@ class RayController:
                     raise RuntimeError(f"Timeout waiting for Ray cluster node {WORKER_TYPE}/{idx} to start.")
             logger.info("Ray cluster started.")
 
-        try:
-            ray_head_addr = base.name_resolve.wait(
-                base.names.ray_cluster(self.__experiment_name, self.__trial_name, "address"), timeout=300
-            )
-        except TimeoutError:
-            raise RuntimeError("Timeout waiting for ray cluster head address.")
-
         logger.info("Ray initialized! Ready to run workers.")
 
         # Create Ray job command.
+        job_id = "rlhf"
         runtime_env_json = '{"working_dir": "/home/fw/sosp-workspace/OpenRLHF"}'
-        ray_job_cmd = f"ray job submit --no-wait --address=\"{ray_head_addr}\" --runtime-env-json='{runtime_env_json}' -- {self.__driver_cmd}"
+        ray_job_cmd = f"ray job submit --no-wait --runtime-env-json='{runtime_env_json}' --address={self.__job_submission_addr} --submission-id {job_id} -- {self.__driver_cmd}"
         logger.info(f"Ready to run Ray job with command:\n{ray_job_cmd}")
 
         # Obtain Ray job id. Used for redirecting log file.
@@ -104,16 +101,22 @@ class RayController:
 
         # Redirect logfile.
         logfile = os.path.join(
-            LOG_ROOT,
+            "/tmp/ray",
             self.__experiment_name,
             self.__trial_name,
             "session_latest/logs",
             f"job-driver-{job_id}.log",
         )
-        logger.info(f">>>>> Check the Ray experiment log with: <<<<<\n\ttail -f {logfile} ")
+        new_logfile = os.path.join(LOG_ROOT, self.__experiment_name, self.__trial_name, f"{job_id}.log")
+        os.makedirs(os.path.dirname(new_logfile), exist_ok=True, mode=0o775)
+        logger.info(f"Local Ray job log path: {logfile}")
 
+        retarget_proc = None
         try:
             while True:
+                if retarget_proc is None and os.path.exists(logfile):
+                    retarget_proc = subprocess.Popen(f"tail -f {logfile} >> {new_logfile}", shell=True)
+                    logger.info(f">>>>> Check the Ray experiment log with: <<<<<\n\ttail -f {new_logfile} ")
                 output = subprocess.check_output(f"ray job status {job_id}", shell=True).decode("utf-8")
                 if "RUNNING" not in output:
                     raise RuntimeError(f"Job {job_id} status is not running. Ray output:\n{output}")
@@ -122,6 +125,7 @@ class RayController:
             logger.info(f"Stop the Ray job due to exception:\n{e}")
             subprocess.check_output(f"ray job stop {job_id}", shell=True)
         finally:
+            retarget_proc.kill()
             self.shutdown()
 
     def shutdown(self):
@@ -138,6 +142,7 @@ _LLM_ENVVARS = {
     "TORCH_EXTENSIONS_DIR": TORCH_EXTENSIONS_DIR,
     "RAY_DEDUP_LOGS": "0",  # disable ray log deduplication
     "CUDA_DEVICE_MAX_CONNECTIONS": "1",
+    "RAY_DISABLE_DOCKER_CPU_WARNING": "1",
     "PYTHONUSERBASE": "/nonsense",
 }
 for k, v in _LLM_ENVVARS.items():
@@ -147,8 +152,8 @@ for k, v in _LLM_ENVVARS.items():
 @dataclasses.dataclass
 class Scheduling:
     count: int
-    cpu: int = 16
-    gpu: int = 8
+    cpu: int = 8
+    gpu: int = 1
     mem: int = 100000
     gpu_type: str = "tesla"
     node_type: str = None
@@ -191,6 +196,7 @@ def driver_cmd(args):
         f"--actor_num_nodes {n_actor_gpus // 8 if n_actor_gpus > 8 else 1}",
         f"--actor_num_gpus_per_node {8 if n_actor_gpus > 8 else n_actor_gpus}",
         f"--critic_num_nodes {n_critic_gpus // 8 if n_critic_gpus > 8 else 1}",
+        f"--critic_num_gpus_per_node {8 if n_critic_gpus > 8 else n_critic_gpus}",
         f"--train_batch_size {4 * n_actor_gpus * args.per_device_train_batch_size}",
         f"--micro_train_batch_size {args.per_device_train_batch_size}",
         f"--critic_micro_train_batch_size {args.per_device_train_batch_size * n_actor_gpus // n_critic_gpus}",
@@ -232,8 +238,8 @@ def control_cmd(expr_name, trial_name, local_mode):
     return cmd
 
 
-def ray_cluster_cmd(expr_name, trial_name, worker_type):
-    flags = [f"-e {expr_name}", f"-f {trial_name}", f"-w {worker_type}"]
+def ray_cluster_cmd(expr_name, trial_name):
+    flags = [f"-e {expr_name}", f"-f {trial_name}"]
     return (
         f"python3 remote.py ray -i {{jobstep_id}} -g {{n_jobsteps}} -r {{worker_submission_index}} "
         f"-p {{wprocs_per_jobstep}} -j {{wprocs_in_job}} -o {{wproc_offset}} {' '.join(flags)}"
@@ -246,12 +252,12 @@ def main_ray_driver(args):
     ray_flags = [
         f"--port={ray_port}",
         "--head",
-        f"--temp-dir={os.path.join(LOG_ROOT, args.experiment_name, args.trial_name)}",
+        f"--temp-dir={os.path.join('/tmp/ray/', args.experiment_name, args.trial_name)}",
     ]
     if args.mode == "slurm":
         ray_flags.extend(
             [
-                f"--num-cpus=0",
+                f"--num-cpus=1",
                 f"--num-gpus=0",
             ]
         )
@@ -269,16 +275,27 @@ def main_ray_driver(args):
     ray_addr_name = base.names.ray_cluster(args.experiment_name, args.trial_name, "address")
     base.name_resolve.add(ray_addr_name, addr, delete_on_exit=True, keepalive_ttl=500)
 
+    jobsub_addr = None
+    for l in output.split("\n"):
+        if "-- python my_script.py" in l:
+            jobsub_addr = l.split("'")[1]
+            logger.info("Found Ray job submission address: '%s'", jobsub_addr)
+            break
+    if jobsub_addr is None:
+        raise RuntimeError(f"Address not found in ray start output: {output}.")
+
     # For slurm model, launch the Ray cluster via slurm command.
     ngpus, _, _ = get_ngpus_and_nodelist_from_model_size(
         args.model_size, args.colocate_actor_critic, args.colocate_ref_rew
     )
+    assert ngpus % 8 == 0
 
     controller = RayController(
         experiment_name=args.experiment_name,
         trial_name=args.trial_name,
         local_mode=args.mode == "local",
-        ray_cluster_count=None if args.mode == "local" else ngpus,
+        ray_cluster_count=None if args.mode == "local" else ngpus // 8,
+        job_submission_addr=jobsub_addr,
         driver_cmd=driver_cmd(args),
     )
     try:
@@ -287,6 +304,49 @@ def main_ray_driver(args):
         subprocess.check_output(f"ray stop", shell=True)
         raise e
     subprocess.check_output(f"ray stop", shell=True)
+
+
+def allocate_slurm_resource_for_ray_cluster(ntasks, nodelist):
+    from scheduler.slurm.utils import (
+        get_all_node_resources,
+        available_hostnames,
+        SlurmResource,
+        SlurmResourceNotEnoughException,
+    )
+
+    resource_requirement = SlurmResource(
+        mem=800000,
+        cpu=64,
+        gpu_type="tesla",
+        gpu=8,
+    )
+    all_resources = get_all_node_resources()
+    valid_hostnames = available_hostnames(nodelist=nodelist)
+    valid_hostnames = list(filter(lambda x: x in all_resources, valid_hostnames))
+    valid_resources = {hn: all_resources[hn] for hn in valid_hostnames}
+    valid_resources = sorted(valid_resources.items(), key=lambda x: x[1], reverse=True)
+    task_left = ntasks
+    allocated = dict()
+    for hostname, resource in valid_resources:
+        tmp = task_left
+        while task_left > 0:
+            try:
+                resource = resource - resource_requirement
+            except ValueError:
+                break
+            if not resource.valid():
+                break
+            task_left -= 1
+        if tmp - task_left > 0:
+            allocated[hostname] = tmp - task_left
+        all_resources[hostname] = resource
+    if task_left > 0:
+        logger.info(f"Request node list {nodelist} is not empty. Experiment could not run.")
+        raise SlurmResourceNotEnoughException()
+    hostlist = []
+    for hostname, task_num in allocated.items():
+        hostlist += [hostname] * task_num
+    return "\n".join(hostlist)
 
 
 def main_start(args):
@@ -332,61 +392,117 @@ def main_start(args):
                 f"--seqlen {args.seqlen}",
                 "--colocate_ref_rew" if args.colocate_ref_rew else "",
                 "--colocate_actor_critic" if args.colocate_actor_critic else "",
+                f"--ray_port {ray_port}",
             ]
         )
         sched.submit_array(
             worker_type="ctl",
             cmd=remote_driver_cmd,
             count=1,
-            cpu=4,
+            cpu=16,
             gpu=0,
             mem=32 * 1024,
             env_vars=base_environs,
             container_image=image_name,
             time_limit=CONTROLLER_TIME_LIMIT,
         )
-        ngpus, _, _ = get_ngpus_and_nodelist_from_model_size(
-            args.model_size, args.colocate_actor_critic, args.colocate_ref_rew
-        )
-        sch_cfg = Scheduling(count=ngpus)
-        job_environs = {**base_environs, **sch_cfg.env_vars}
-        cmd = ray_cluster_cmd(
-            expr_name,
-            trial_name,
-            worker_type=WORKER_TYPE,
-        )
 
         logger.debug(f"Scheduling Ray cluster...")
 
-        nodelist = sch_cfg.nodelist
-        exclude = sch_cfg.exclude
-        node_type = sch_cfg.node_type
-        container_image = image_name or sch_cfg.container_image
-
-        sched.submit_array(
-            worker_type=WORKER_TYPE,
-            cmd=cmd,
-            count=sch_cfg.count,
-            cpu=sch_cfg.cpu,
-            gpu=sch_cfg.gpu,
-            gpu_type=sch_cfg.gpu_type,
-            mem=sch_cfg.mem,
-            container_image=container_image,
-            node_type=node_type,
-            nodelist=nodelist,
-            exclude=exclude,
-            env_vars=job_environs,
-            hostfile=True,
-            multiprog=True,
-            begin=sch_cfg.begin,
-            deadline=sch_cfg.deadline,
-            time_limit=sch_cfg.time_limit,
+        ngpus, _, nodelist = get_ngpus_and_nodelist_from_model_size(
+            args.model_size, args.colocate_actor_critic, args.colocate_ref_rew
         )
+        assert ngpus % 8 == 0
+        n_nodes = ngpus // 8
+
+        job_environs = {**base_environs, **_LLM_ENVVARS}
+        ray_cluster_log = os.path.join(LOG_ROOT, expr_name, trial_name, "ray_cluster.log")
+        os.makedirs(os.path.dirname(ray_cluster_log), exist_ok=True, mode=0o775)
+        hostfile_path = os.path.join(LOG_ROOT, expr_name, trial_name, "ray_cluster.hostfile")
+        multiprog_path = os.path.join(LOG_ROOT, expr_name, trial_name, "ray_cluster.multiprog")
+        logger.info(f"To check the output, run \n\t`tail -f {ray_cluster_log}`.")
+
+        multiprog_cmd = ray_cluster_cmd(args.experiment_name, args.trial_name).format(
+            jobstep_id="%t",
+            n_jobsteps=n_nodes,
+            worker_submission_index=0,
+            wprocs_per_jobstep=1,
+            wprocs_in_job=n_nodes,
+            wproc_offset=0,
+        )
+        multiprog_content = f"0-{n_nodes - 1} {multiprog_cmd}\n"
+        with open(multiprog_path, "w") as f:
+            f.write(multiprog_content)
+
+        hostfile_content = allocate_slurm_resource_for_ray_cluster(n_nodes, nodelist)
+        with open(hostfile_path, "w") as f:
+            f.write(hostfile_content)
+
+        raycluster_slurm_job_name = f"{args.experiment_name}_{args.trial_name}:ray_cluster"
+        sbatch_lines = [
+            "#!/bin/bash",
+            f"#SBATCH --job-name={raycluster_slurm_job_name}",
+            f"#SBATCH --output={ray_cluster_log}",
+            f"#SBATCH --ntasks={n_nodes}",
+            f"#SBATCH --ntasks-per-node=1",
+            f"#SBATCH --gpus-per-task=tesla:8",
+            f"#SBATCH --cpus-per-task=64",
+            f"#SBATCH --mem-per-cpu={800000 // 64}M",
+            "#SBATCH --distribution=arbitrary",
+        ]
+
+        srun_env = os.environ.copy()
+        srun_env["SLURM_HOSTFILE"] = hostfile_path
+        # Setup step command.
+        srun_flags = [
+            f"--ntasks={n_nodes}",
+            f"--cpus-per-task=64",
+            f"--gpus-per-task=tesla:8",
+            f"--mem-per-cpu={800000 // 64}",
+            f"--export={','.join(str(k)+'='+str(v) for k, v in job_environs.items())}",
+            f"--multi-prog",
+            f"--container-image={image_name}",
+            f"--container-mounts={cluster.spec.default_mount}",
+            f"--container-mount-home",
+            "--container-workdir=/home/fw/sosp-workspace/OpenRLHF",
+        ]
+
+        srun_cmd = f'srun -l {" ".join(srun_flags)} {multiprog_path}'
+
+        sbatch_lines += [
+            'echo "[Runner] StartTime: $(date -u)"',
+            'echo "[Runner] Host: $(hostname)"',
+            "echo '[Runner] Command: {}'".format(srun_cmd),
+            "echo '[Runner] Log: {}'".format(ray_cluster_log),
+            'echo "[Runner] CudaVisible: $CUDA_VISIBLE_DEVICES"',
+            'echo "[Runner] CudaMpsPerc: $CUDA_MPS_ACTIVE_THREAD_PERCENTAGE"',
+            srun_cmd,
+            "RETCODE=$?",
+            'echo "[Runner] FinishTime: $(date -u)"',
+            'echo "[Runner] RetCode: $RETCODE"',
+            'echo "[Runner] ------------"',
+            "exit $RETCODE",
+        ]
+
+        script_strs = "\n".join(list(filter(lambda x: x, sbatch_lines))) + "\n"
+        script = script_strs.encode("ascii")
+
+        r = (
+            subprocess.check_output(["sbatch", "--parsable"], input=script, env=srun_env)
+            .decode("ascii")
+            .strip()
+        )
+        from scheduler.slurm.utils import cancel_jobs
+
+        new_logfile = os.path.join(LOG_ROOT, args.experiment_name, args.trial_name, f"rlhf.log")
+        logger.info(f">>>>> Check the Ray experiment log with: <<<<<\n\ttail -f {new_logfile} ")
         try:
             sched.wait()
         except (KeyboardInterrupt, scheduler.client.JobException, TimeoutError) as e:
+            cancel_jobs([raycluster_slurm_job_name])
             sched.stop_all()
             raise e
+        cancel_jobs([raycluster_slurm_job_name])
 
 
 def get_path_from_model_size(model_size: int):
@@ -461,6 +577,8 @@ if __name__ == "__main__":
     subparser.add_argument("--zero_stage", type=int, default=2)
     subparser.add_argument("--offload", action="store_true")
     subparser.add_argument("--seqlen", type=int, default=256)
+
+    subparser.add_argument("--ray_port", type=int, required=True)
     subparser.set_defaults(func=main_ray_driver)
 
     args = parser.parse_args()

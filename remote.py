@@ -26,7 +26,7 @@ logger = logging.getLogger("Main-Workers")
 
 
 def main_ray(args):
-    worker_type = "default"
+    worker_type = "default-ray-cluster"
     ray_addr_name = base.names.ray_cluster(args.experiment_name, args.trial_name, "address")
     try:
         address = base.name_resolve.wait(ray_addr_name, timeout=RAY_HEAD_WAIT_TIME)
