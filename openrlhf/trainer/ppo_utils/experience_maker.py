@@ -342,6 +342,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             top_p=kwargs.get("top_p", 1.0),
             top_k=kwargs.get("top_k", -1),
             max_tokens=kwargs.get("max_new_tokens", 16),
+            ignore_eos=True,
         )
 
         # TODO: can't pass `max_length` to vLLM's tokenizer for input truncation, remove this once it is supported.

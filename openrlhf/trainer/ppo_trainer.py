@@ -338,6 +338,7 @@ class PPOTrainer(ABC):
             train_iter_tik = time.perf_counter()
             for rand_prompts in self.prompts_dataloader:
                 experience, gen_time, inf_time = self.experience_maker.make_experience(rand_prompts, **self.generate_kwargs)
+                logger.info(f"Generation sequence length: {experience.sequences.size(1)}")
                 # print prompt/answer in each update step
                 # if global_step % update_timesteps == 0:
                 #     output = self.tokenizer.batch_decode(experience.sequences, skip_special_tokens=True)
@@ -354,7 +355,7 @@ class PPOTrainer(ABC):
                     _step_cnt += 1
                     self.replay_buffer.clear()
                     torch.cuda.empty_cache()
-                    self.kl_ctl.update(status["kl"], args.rollout_batch_size)
+                    # self.kl_ctl.update(status["kl"], args.rollout_batch_size)
                     # logs/checkpoints
                     # self.save_logs_and_checkpoints(args, global_step // update_timesteps, pbar, status)
                     train_time = time.perf_counter() - ts

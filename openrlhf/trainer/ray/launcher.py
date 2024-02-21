@@ -78,7 +78,8 @@ class BasePPORole(DistributedTorchRayActor):
         torch.cuda.set_device(0)
         torch.distributed.init_process_group(backend='nccl')
         strategy.setup_distributed()
-        self.monitor_proc.start()
+        if self._rank == 0:
+            self.monitor_proc.start()
 
     def init_model_from_pretrained(self, *args, **kwargs):
         raise NotImplementedError()
