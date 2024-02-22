@@ -13,7 +13,47 @@ from openrlhf.trainer.ray import (
     ReferenceModelRayActor,
     RewardModelRayActor,
 )
+from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+from openrlhf.trainer.ray.vllm_engine import LLMRayActor
 from openrlhf.utils import blending_datasets, get_strategy, get_tokenizer
+
+
+def create_vllm_engines(num_engines: int, tensor_parallel_size: int, pretrain: str, seed: int):
+
+    vllm_engines = []
+    for idx in range(num_engines):
+        # When tensor_parallel_size=1, vLLM init model in LLMEngine directly, assign 1 GPU for it.
+        num_gpus = int(tensor_parallel_size == 1)
+        scheduling_strategy = None
+
+        if tensor_parallel_size > 1:
+            num_gpus = 0.1
+            bundles = [{"GPU": 1, "CPU": 1}] * tensor_parallel_size
+            pg = placement_group(bundles)
+            ray.get(pg.ready())
+
+            scheduling_strategy = PlacementGroupSchedulingStrategy(
+                placement_group=pg,
+                placement_group_capture_child_tasks=True,
+                placement_group_bundle_index=0,
+            )
+
+        vllm_engines.append(
+            LLMRayActor.options(
+                num_cpus=1,
+                num_gpus=num_gpus,
+                scheduling_strategy=scheduling_strategy,
+            ).remote(
+                idx,
+                pretrain,
+                trust_remote_code=True,
+                tensor_parallel_size=tensor_parallel_size,
+                dtype="bfloat16",
+                seed=seed,
+            )
+        )
+
+    return vllm_engines
 
 
 # NOTE: reward function for multiple reward models, replace this with your own function!
@@ -134,21 +174,12 @@ def train(args):
     # init vLLM engine for text generation
     vllm_engines = None
     if args.vllm_num_engines is not None:
-        from openrlhf.trainer.ray.vllm_engine import LLMRayActor
-
-        # When tensor_parallel_size=1, vLLM init model in LLMEngine directly, assign 1 GPU for it.
-        num_gpus = int(args.vllm_tensor_parallel_size == 1)
-        vllm_engines = [
-            LLMRayActor.options(num_gpus=num_gpus).remote(
-                idx,
-                args.pretrain,
-                trust_remote_code=True,
-                tensor_parallel_size=args.vllm_tensor_parallel_size,
-                dtype="bfloat16" if args.bf16 else "auto",
-                seed=args.seed,
-            )
-            for idx in range(args.vllm_num_engines)
-        ]
+        # print(">>>>>>>>>>>>>>>>> Initializing vLLM Engine")
+        # import subprocess
+        # print(">>> ray status", subprocess.check_output("ray status", shell=True).decode("utf-8"))
+        vllm_engines = create_vllm_engines(
+            args.vllm_num_engines, args.vllm_tensor_parallel_size, args.pretrain, args.seed
+        )
 
     # critic scheduler initialization depends on max_step, so we have to init critic after actor
     # TODO: use first reward model as critic model
@@ -163,8 +194,8 @@ def train(args):
     ray.get(refs)
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
+def get_args():
+    parser = argparse.ArgumentParser(prog="train_openrlhf_ray")
     parser.add_argument("--ref_num_nodes", type=int, default=1, help="number of nodes for reference")
     parser.add_argument(
         "--ref_num_gpus_per_node", type=int, default=1, help="number of gpus per node for reference"
@@ -293,4 +324,9 @@ if __name__ == "__main__":
     parser.add_argument("--perf", action="store_true", default=False)
 
     args = parser.parse_args()
+    return args
+
+
+if __name__ == "__main__":
+    args = get_args()
     train(args)

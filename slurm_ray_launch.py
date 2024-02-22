@@ -1,9 +1,11 @@
+import ray
 import argparse
 import dataclasses
 import getpass
 import os
 import random
 import socket
+from datetime import datetime
 import re
 import subprocess
 import time
@@ -85,9 +87,22 @@ class RayController:
         logger.info("Ray initialized! Ready to run workers.")
 
         # Create Ray job command.
+        # ray.init()
+        # train_args = build_train_args(args)
+
+        # from train_ppo_ray import train
+
+        # train(train_args)
+
+        # self.shutdown()
+
         job_id = "rlhf"
         runtime_env_json = '{"working_dir": "/home/fw/sosp-workspace/OpenRLHF"}'
-        ray_job_cmd = f"ray job submit --no-wait --runtime-env-json='{runtime_env_json}' --address={self.__job_submission_addr} --submission-id {job_id} -- {self.__driver_cmd}"
+        ray_job_cmd = (
+            f"ray job submit --no-wait "
+            # f"--entrypoint-num-gpus=1 --entrypoint-num-cpus=2 "
+            f"--runtime-env-json='{runtime_env_json}' --address={self.__job_submission_addr} --submission-id {job_id} -- {self.__driver_cmd}"
+        )
         logger.info(f"Ready to run Ray job with command:\n{ray_job_cmd}")
 
         # Obtain Ray job id. Used for redirecting log file.
@@ -169,24 +184,24 @@ class Scheduling:
 
 def driver_cmd(args):
     ngpus, device_partition, nodelist = get_ngpus_and_nodelist_from_model_size(
-        args.model_size, args.colocate_actor_critic, args.colocate_ref_rew
+        args.model_size, args.colocate_actor_critic, args.colocate_ref_reward
     )
     assert all(g <= 8 or g % 8 == 0 for g in device_partition)
     n_actor_gpus = device_partition[0]
     n_critic_gpus = device_partition[1]
     n_ref_gpus = device_partition[2]
     n_rew_gpus = device_partition[3]
+    n_vllm_engines_gpus = device_partition[4]
     if args.colocate_actor_critic:
         assert n_actor_gpus == n_critic_gpus
         actor_critic_gpus = n_actor_gpus
     else:
         actor_critic_gpus = n_actor_gpus + n_critic_gpus
-    if args.colocate_ref_rew:
+    if args.colocate_ref_reward:
         assert n_ref_gpus == n_rew_gpus
         ref_rew_gpus = n_ref_gpus
     else:
         ref_rew_gpus = n_ref_gpus + n_rew_gpus
-    assert ngpus == actor_critic_gpus + ref_rew_gpus
     cmd = ["python3", "train_ppo_ray.py"]
     flags = [
         f"--ref_num_nodes {n_ref_gpus // 8 if n_ref_gpus > 8 else 1}",
@@ -197,11 +212,11 @@ def driver_cmd(args):
         f"--actor_num_gpus_per_node {8 if n_actor_gpus > 8 else n_actor_gpus}",
         f"--critic_num_nodes {n_critic_gpus // 8 if n_critic_gpus > 8 else 1}",
         f"--critic_num_gpus_per_node {8 if n_critic_gpus > 8 else n_critic_gpus}",
-        f"--train_batch_size {4 * n_actor_gpus * args.per_device_train_batch_size}",
-        f"--micro_train_batch_size {args.per_device_train_batch_size}",
-        f"--critic_micro_train_batch_size {args.per_device_train_batch_size * n_actor_gpus // n_critic_gpus}",
-        f"--rollout_batch_size {n_actor_gpus * args.per_device_gen_batch_size}",
-        f"--micro_rollout_batch_size {args.per_device_gen_batch_size}",
+        f"--train_batch_size {4 * n_actor_gpus * args.per_device_bs}",
+        f"--micro_train_batch_size {args.per_device_bs}",
+        f"--critic_micro_train_batch_size {args.per_device_bs * n_actor_gpus // n_critic_gpus}",
+        f"--rollout_batch_size {n_actor_gpus * args.per_device_bs}",
+        f"--micro_rollout_batch_size {args.per_device_bs}",
         f"--max_epochs 1",
         f"--prompt_max_len 256",
         f"--generate_max_len {args.seqlen}",
@@ -217,18 +232,81 @@ def driver_cmd(args):
     flags.extend(
         [
             f"--pretrain {model_path}",
-            f"--reward_pretrain {model_path}",
+            f"--reward_pretrain /lustre/public/pretrained_model_weights/Llama-2-7b-hf",
         ]
     )
-    if args.zero_stage == 3:
-        flags.append("--bf16")
-    if args.vllm_num_engines > 0:
-        assert args.model_size > 7
-        flags.append(f"--vllm_num_engines {args.vllm_num_engines}")
-        flags.append(
-            f"--vllm_tensor_parallel_size {2 if args.model_size ==13 else 4 if args.model_size==34 else 8}"
-        )
+    # if args.zero_stage == 3:
+    flags.append("--bf16")
+    if n_vllm_engines_gpus > 0:
+        if args.model_size <= 34:
+            vllm_tp_size = 2
+        elif args.model_size == 70:
+            vllm_tp_size = 4
+        assert n_vllm_engines_gpus % vllm_tp_size == 0
+        n_vllm_engines = n_vllm_engines_gpus // vllm_tp_size
+        flags.append(f"--vllm_num_engines {n_vllm_engines}")
+        flags.append(f"--vllm_tensor_parallel_size {vllm_tp_size}")
     return " ".join(cmd + flags)
+
+
+# def build_train_args(args):
+#     train_args = args
+#     print(">>> after get train args")
+
+#     ngpus, device_partition, nodelist = get_ngpus_and_nodelist_from_model_size(
+#         args.model_size, args.colocate_actor_critic, args.colocate_ref_reward
+#     )
+#     assert all(g <= 8 or g % 8 == 0 for g in device_partition)
+#     n_actor_gpus = device_partition[0]
+#     n_critic_gpus = device_partition[1]
+#     n_ref_gpus = device_partition[2]
+#     n_rew_gpus = device_partition[3]
+#     n_vllm_engines_gpus = device_partition[4]
+
+#     train_args.ref_num_nodes = n_ref_gpus // 8 if n_ref_gpus > 8 else 1
+#     train_args.ref_num_gpus_per_node = 8 if n_ref_gpus > 8 else n_ref_gpus
+#     train_args.reward_num_nodes = n_rew_gpus // 8 if n_rew_gpus > 8 else 1
+#     train_args.reward_num_gpus_per_node = 8 if n_rew_gpus > 8 else n_rew_gpus
+#     train_args.actor_num_nodes = n_actor_gpus // 8 if n_actor_gpus > 8 else 1
+#     train_args.actor_num_gpus_per_node = 8 if n_actor_gpus > 8 else n_actor_gpus
+#     train_args.critic_num_nodes = n_critic_gpus // 8 if n_critic_gpus > 8 else 1
+#     train_args.critic_num_gpus_per_node = 8 if n_critic_gpus > 8 else n_critic_gpus
+
+#     train_args.train_batch_size = 4 * n_actor_gpus * args.per_device_bs
+#     train_args.micro_train_batch_size = args.per_device_bs
+#     train_args.critic_micro_train_batch_size = args.per_device_bs * n_actor_gpus // n_critic_gpus
+#     train_args.rollout_batch_size = n_actor_gpus * args.per_device_bs
+
+#     train_args.max_epochs = 1
+#     train_args.prompt_max_len = 256
+#     train_args.generate_max_len = args.seqlen
+#     train_args.zero_stage = args.zero_stage
+
+#     train_args.normalize_reward = True
+#     train_args.actor_init_on_gpu = True
+#     train_args.flash_attn = True
+#     train_args.gradient_checkpointing = True
+
+#     if args.offload:
+#         train_args.adam_offload = True
+
+#     model_path = get_path_from_model_size(args.model_size)
+#     train_args.pretrain = model_path
+#     train_args.reward_pretrain = "/lustre/public/pretrained_model_weights/Llama-2-7b-hf"
+
+#     if args.zero_stage == 3:
+#         train_args.bf16 = True
+#     if n_vllm_engines_gpus > 0:
+#         if args.model_size <= 13:
+#             vllm_tp_size = 1
+#         elif args.model_size == 34:
+#             vllm_tp_size = 2
+#         elif args.model_size == 70:
+#             vllm_tp_size = 4
+#         assert n_vllm_engines_gpus % vllm_tp_size == 0
+#         n_vllm_engines = n_vllm_engines_gpus // vllm_tp_size
+#         train_args.vllm_num_engines = n_vllm_engines
+#     return train_args
 
 
 def control_cmd(expr_name, trial_name, local_mode):
@@ -247,20 +325,20 @@ def ray_cluster_cmd(expr_name, trial_name):
 
 
 def main_ray_driver(args):
-    ray_port = args.ray_port
+    # ray_port = args.ray_port
     # launch ray cluster head
     ray_flags = [
-        f"--port={ray_port}",
+        # f"--port={ray_port}",
         "--head",
         f"--temp-dir={os.path.join('/tmp/ray/', args.experiment_name, args.trial_name)}",
     ]
-    if args.mode == "slurm":
-        ray_flags.extend(
-            [
-                f"--num-cpus=1",
-                f"--num-gpus=0",
-            ]
-        )
+    # if args.mode == "slurm":
+    #     ray_flags.extend(
+    #         [
+    #             f"--num-cpus=0",
+    #             f"--num-gpus=0",
+    #         ]
+    #     )
     cmd = f"ray start {' '.join(ray_flags)}"
     output = subprocess.check_output(cmd, shell=True).decode("ascii")
     logger.info("Successfully launched ray cluster head.")
@@ -286,7 +364,7 @@ def main_ray_driver(args):
 
     # For slurm model, launch the Ray cluster via slurm command.
     ngpus, _, _ = get_ngpus_and_nodelist_from_model_size(
-        args.model_size, args.colocate_actor_critic, args.colocate_ref_rew
+        args.model_size, args.colocate_actor_critic, args.colocate_ref_reward
     )
     assert ngpus % 8 == 0
 
@@ -294,7 +372,7 @@ def main_ray_driver(args):
         experiment_name=args.experiment_name,
         trial_name=args.trial_name,
         local_mode=args.mode == "local",
-        ray_cluster_count=None if args.mode == "local" else ngpus // 8,
+        ray_cluster_count=None if args.mode == "local" else (ngpus // 8 - 1),
         job_submission_addr=jobsub_addr,
         driver_cmd=driver_cmd(args),
     )
@@ -351,7 +429,7 @@ def allocate_slurm_resource_for_ray_cluster(ntasks, nodelist):
 
 def main_start(args):
     image_name = "llm/llm-openrlhf"
-    args.ray_port = ray_port = get_random_port()
+    # args.ray_port = ray_port = get_random_port()
 
     trial_name = args.trial_name
     expr_name = args.experiment_name
@@ -384,114 +462,119 @@ def main_start(args):
                 f"-f {args.trial_name}",
                 f"--model_size {args.model_size}",
                 f"--mode {args.mode}",
-                f"--vllm_num_engines {args.vllm_num_engines}",
-                f"--per_device_train_batch_size {args.per_device_train_batch_size}",
-                f"--per_device_gen_batch_size {args.per_device_gen_batch_size}",
+                f"--per_device_bs {args.per_device_bs}",
                 f"--zero_stage {args.zero_stage}",
                 f"--offload" if args.offload else "",
                 f"--seqlen {args.seqlen}",
-                "--colocate_ref_rew" if args.colocate_ref_rew else "",
+                "--colocate_ref_reward" if args.colocate_ref_reward else "",
                 "--colocate_actor_critic" if args.colocate_actor_critic else "",
-                f"--ray_port {ray_port}",
+                # f"--ray_port {ray_port}",
             ]
         )
+        ngpus, _, nodelist = get_ngpus_and_nodelist_from_model_size(
+            args.model_size, args.colocate_actor_critic, args.colocate_ref_reward
+        )
+        assert ngpus % 8 == 0
+        n_ray_cluster_nodes = ngpus // 8 - 1
+
+        _hostfile_content = allocate_slurm_resource_for_ray_cluster(ngpus // 8, nodelist)
+
+        head_nodelist = _hostfile_content.split("\n")[0]
+        ray_cluster_hostfile_content = "\n".join(_hostfile_content.split("\n")[1:])
+
         sched.submit_array(
             worker_type="ctl",
             cmd=remote_driver_cmd,
             count=1,
-            cpu=16,
-            gpu=0,
-            mem=32 * 1024,
+            cpu=64,
+            gpu=8,
+            gpu_type="tesla",
+            mem=int(1000e3),
             env_vars=base_environs,
             container_image=image_name,
             time_limit=CONTROLLER_TIME_LIMIT,
+            nodelist=head_nodelist,
         )
 
         logger.debug(f"Scheduling Ray cluster...")
 
-        ngpus, _, nodelist = get_ngpus_and_nodelist_from_model_size(
-            args.model_size, args.colocate_actor_critic, args.colocate_ref_rew
-        )
-        assert ngpus % 8 == 0
-        n_nodes = ngpus // 8
+        if n_ray_cluster_nodes > 0:
+            job_environs = {**base_environs, **_LLM_ENVVARS}
+            ray_cluster_log = os.path.join(LOG_ROOT, expr_name, trial_name, "ray_cluster.log")
+            os.makedirs(os.path.dirname(ray_cluster_log), exist_ok=True, mode=0o775)
+            hostfile_path = os.path.join(LOG_ROOT, expr_name, trial_name, "ray_cluster.hostfile")
+            multiprog_path = os.path.join(LOG_ROOT, expr_name, trial_name, "ray_cluster.multiprog")
+            logger.info(f"To check the output, run \n\t`tail -f {ray_cluster_log}`.")
 
-        job_environs = {**base_environs, **_LLM_ENVVARS}
-        ray_cluster_log = os.path.join(LOG_ROOT, expr_name, trial_name, "ray_cluster.log")
-        os.makedirs(os.path.dirname(ray_cluster_log), exist_ok=True, mode=0o775)
-        hostfile_path = os.path.join(LOG_ROOT, expr_name, trial_name, "ray_cluster.hostfile")
-        multiprog_path = os.path.join(LOG_ROOT, expr_name, trial_name, "ray_cluster.multiprog")
-        logger.info(f"To check the output, run \n\t`tail -f {ray_cluster_log}`.")
+            multiprog_cmd = ray_cluster_cmd(args.experiment_name, args.trial_name).format(
+                jobstep_id="%t",
+                n_jobsteps=n_ray_cluster_nodes,
+                worker_submission_index=0,
+                wprocs_per_jobstep=1,
+                wprocs_in_job=n_ray_cluster_nodes,
+                wproc_offset=0,
+            )
+            multiprog_content = f"0-{n_ray_cluster_nodes - 1} {multiprog_cmd}\n"
+            with open(multiprog_path, "w") as f:
+                f.write(multiprog_content)
 
-        multiprog_cmd = ray_cluster_cmd(args.experiment_name, args.trial_name).format(
-            jobstep_id="%t",
-            n_jobsteps=n_nodes,
-            worker_submission_index=0,
-            wprocs_per_jobstep=1,
-            wprocs_in_job=n_nodes,
-            wproc_offset=0,
-        )
-        multiprog_content = f"0-{n_nodes - 1} {multiprog_cmd}\n"
-        with open(multiprog_path, "w") as f:
-            f.write(multiprog_content)
+            with open(hostfile_path, "w") as f:
+                f.write(ray_cluster_hostfile_content)
 
-        hostfile_content = allocate_slurm_resource_for_ray_cluster(n_nodes, nodelist)
-        with open(hostfile_path, "w") as f:
-            f.write(hostfile_content)
+            raycluster_slurm_job_name = f"{args.experiment_name}_{args.trial_name}:ray_cluster"
+            sbatch_lines = [
+                "#!/bin/bash",
+                f"#SBATCH --job-name={raycluster_slurm_job_name}",
+                f"#SBATCH --output={ray_cluster_log}",
+                f"#SBATCH --ntasks={n_ray_cluster_nodes}",
+                f"#SBATCH --ntasks-per-node=1",
+                f"#SBATCH --gpus-per-task=tesla:8",
+                f"#SBATCH --cpus-per-task=64",
+                f"#SBATCH --mem-per-cpu={1000000 // 64}M",
+                "#SBATCH --distribution=arbitrary",
+            ]
 
-        raycluster_slurm_job_name = f"{args.experiment_name}_{args.trial_name}:ray_cluster"
-        sbatch_lines = [
-            "#!/bin/bash",
-            f"#SBATCH --job-name={raycluster_slurm_job_name}",
-            f"#SBATCH --output={ray_cluster_log}",
-            f"#SBATCH --ntasks={n_nodes}",
-            f"#SBATCH --ntasks-per-node=1",
-            f"#SBATCH --gpus-per-task=tesla:8",
-            f"#SBATCH --cpus-per-task=64",
-            f"#SBATCH --mem-per-cpu={800000 // 64}M",
-            "#SBATCH --distribution=arbitrary",
-        ]
+            srun_env = os.environ.copy()
+            srun_env["SLURM_HOSTFILE"] = hostfile_path
+            # Setup step command.
+            srun_flags = [
+                f"--ntasks={n_ray_cluster_nodes}",
+                f"--cpus-per-task=64",
+                f"--gpus-per-task=tesla:8",
+                f"--mem-per-cpu={1000000 // 64}",
+                f"--export={','.join(str(k)+'='+str(v) for k, v in job_environs.items())}",
+                f"--multi-prog",
+                f"--container-image={image_name}",
+                f"--container-mounts={cluster.spec.default_mount}",
+                f"--container-mount-home",
+                "--container-workdir=/home/fw/sosp-workspace/OpenRLHF",
+            ]
 
-        srun_env = os.environ.copy()
-        srun_env["SLURM_HOSTFILE"] = hostfile_path
-        # Setup step command.
-        srun_flags = [
-            f"--ntasks={n_nodes}",
-            f"--cpus-per-task=64",
-            f"--gpus-per-task=tesla:8",
-            f"--mem-per-cpu={800000 // 64}",
-            f"--export={','.join(str(k)+'='+str(v) for k, v in job_environs.items())}",
-            f"--multi-prog",
-            f"--container-image={image_name}",
-            f"--container-mounts={cluster.spec.default_mount}",
-            f"--container-mount-home",
-            "--container-workdir=/home/fw/sosp-workspace/OpenRLHF",
-        ]
+            srun_cmd = f'srun -l {" ".join(srun_flags)} {multiprog_path}'
 
-        srun_cmd = f'srun -l {" ".join(srun_flags)} {multiprog_path}'
+            sbatch_lines += [
+                'echo "[Runner] StartTime: $(date -u)"',
+                'echo "[Runner] Host: $(hostname)"',
+                "echo '[Runner] Command: {}'".format(srun_cmd),
+                "echo '[Runner] Log: {}'".format(ray_cluster_log),
+                'echo "[Runner] CudaVisible: $CUDA_VISIBLE_DEVICES"',
+                'echo "[Runner] CudaMpsPerc: $CUDA_MPS_ACTIVE_THREAD_PERCENTAGE"',
+                srun_cmd,
+                "RETCODE=$?",
+                'echo "[Runner] FinishTime: $(date -u)"',
+                'echo "[Runner] RetCode: $RETCODE"',
+                'echo "[Runner] ------------"',
+                "exit $RETCODE",
+            ]
 
-        sbatch_lines += [
-            'echo "[Runner] StartTime: $(date -u)"',
-            'echo "[Runner] Host: $(hostname)"',
-            "echo '[Runner] Command: {}'".format(srun_cmd),
-            "echo '[Runner] Log: {}'".format(ray_cluster_log),
-            'echo "[Runner] CudaVisible: $CUDA_VISIBLE_DEVICES"',
-            'echo "[Runner] CudaMpsPerc: $CUDA_MPS_ACTIVE_THREAD_PERCENTAGE"',
-            srun_cmd,
-            "RETCODE=$?",
-            'echo "[Runner] FinishTime: $(date -u)"',
-            'echo "[Runner] RetCode: $RETCODE"',
-            'echo "[Runner] ------------"',
-            "exit $RETCODE",
-        ]
+            script_strs = "\n".join(list(filter(lambda x: x, sbatch_lines))) + "\n"
+            script = script_strs.encode("ascii")
 
-        script_strs = "\n".join(list(filter(lambda x: x, sbatch_lines))) + "\n"
-        script = script_strs.encode("ascii")
-
-        r = (
-            subprocess.check_output(["sbatch", "--parsable"], input=script, env=srun_env)
-            .decode("ascii")
-            .strip()
-        )
+            r = (
+                subprocess.check_output(["sbatch", "--parsable"], input=script, env=srun_env)
+                .decode("ascii")
+                .strip()
+            )
         from scheduler.slurm.utils import cancel_jobs
 
         new_logfile = os.path.join(LOG_ROOT, args.experiment_name, args.trial_name, f"rlhf.log")
@@ -511,7 +594,7 @@ def get_path_from_model_size(model_size: int):
     elif model_size == 13:
         model_path = "/lustre/public/pretrained_model_weights/Llama-2-13b-hf"
     elif model_size == 34:
-        model_path = "/lustre/public/pretrained_model_weights/CodeLlama-34b-hf"
+        model_path = "/lustre/public/pretrained_model_weights/CodeLlama-34b-hf-pt"
     elif model_size == 70:
         model_path = "/lustre/public/pretrained_model_weights/Llama-2-70b-hf"
     else:
@@ -520,25 +603,24 @@ def get_path_from_model_size(model_size: int):
 
 
 def get_ngpus_and_nodelist_from_model_size(
-    model_size: int, colocate_actor_critic: bool, colocate_ref_rew: bool
+    model_size: int, colocate_actor_critic: bool, colocate_ref_reward: bool
 ):
-    device_partition = None
+    assert not colocate_actor_critic
+    assert not colocate_ref_reward
     if model_size in [7]:
-        if colocate_actor_critic and colocate_ref_rew:
-            device_partition = (6, 6, 2, 2)
-        elif colocate_actor_critic:
-            device_partition = (6, 6, 1, 1)
-        elif colocate_ref_rew:
-            device_partition = (4, 2, 2, 2)
-        else:
-            device_partition = (4, 2, 1, 1)
+        # actor, critic, ref, rew, vllm-engine
+        device_partition = (4, 2, 1, 1, 0)
         ngpus, nodelist = 8, "QH-com01"
     elif model_size == 13:
-        ngpus, nodelist = 16, "QH-com[02-03]"
+        device_partition = (8, 4, 2, 2, 0)
+        ngpus, nodelist = 16, "QH-com[09-10]"
     elif model_size in [34]:
-        ngpus, nodelist = 32, "QH-com[04-06,09]"
+        device_partition = (16, 2, 4, 2, 8)
+        ngpus, nodelist = 32, "QH-com[25-28]"
     elif model_size == 70:
+        device_partition = (40, 2, 4, 2, 16)
         ngpus, nodelist = 64, "QH-com[36-43]"
+    assert sum(device_partition) == ngpus, (device_partition, ngpus)
     return ngpus, device_partition, nodelist
 
 
@@ -552,14 +634,22 @@ if __name__ == "__main__":
     subparser.add_argument("--trial_name", "-f", type=str, required=True)
     subparser.add_argument("--mode", default="slurm", choices=["local", "slurm"])
 
+    subparser.add_argument(
+        "--colocate_actor_critic",
+        action="store_true",
+        default=False,
+        help="whether to colocate actor and critic model, if true, they will share same gpus.",
+    )
+    subparser.add_argument(
+        "--colocate_ref_reward",
+        action="store_true",
+        default=False,
+        help="whether to colocate reference and reward model, if true, they will share same gpus.",
+    )
     subparser.add_argument("--model_size", type=int, choices=[7, 13, 34, 70], required=True)
-    subparser.add_argument("--vllm_num_engines", type=int, default=0)
-    subparser.add_argument("--colocate_ref_rew", action="store_true")
-    subparser.add_argument("--colocate_actor_critic", action="store_true")
-    subparser.add_argument("--per_device_train_batch_size", type=int, default=4)
-    subparser.add_argument("--per_device_gen_batch_size", type=int, default=4)
-    subparser.add_argument("--zero_stage", type=int, default=2)
+    subparser.add_argument("--per_device_bs", type=int, default=4)
     subparser.add_argument("--offload", action="store_true")
+    subparser.add_argument("--zero_stage", type=int, default=2)
     subparser.add_argument("--seqlen", type=int, default=256)
     subparser.set_defaults(func=main_start)
 
@@ -569,16 +659,24 @@ if __name__ == "__main__":
     subparser.add_argument("--mode", default="slurm", choices=["local", "slurm"])
 
     subparser.add_argument("--model_size", type=int, choices=[7, 13, 34, 70], required=True)
-    subparser.add_argument("--vllm_num_engines", type=int, default=0)
-    subparser.add_argument("--colocate_ref_rew", action="store_true")
-    subparser.add_argument("--colocate_actor_critic", action="store_true")
-    subparser.add_argument("--per_device_train_batch_size", type=int, default=4)
-    subparser.add_argument("--per_device_gen_batch_size", type=int, default=4)
-    subparser.add_argument("--zero_stage", type=int, default=2)
+    subparser.add_argument("--per_device_bs", type=int, default=4)
     subparser.add_argument("--offload", action="store_true")
     subparser.add_argument("--seqlen", type=int, default=256)
+    subparser.add_argument("--zero_stage", type=int, default=2)
+    subparser.add_argument(
+        "--colocate_actor_critic",
+        action="store_true",
+        default=False,
+        help="whether to colocate actor and critic model, if true, they will share same gpus.",
+    )
+    subparser.add_argument(
+        "--colocate_ref_reward",
+        action="store_true",
+        default=False,
+        help="whether to colocate reference and reward model, if true, they will share same gpus.",
+    )
 
-    subparser.add_argument("--ray_port", type=int, required=True)
+    # subparser.add_argument("--ray_port", type=int, required=True)
     subparser.set_defaults(func=main_ray_driver)
 
     args = parser.parse_args()

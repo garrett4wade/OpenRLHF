@@ -134,13 +134,15 @@ class ActorPPOTrainer(PPOTrainer):
                     for engine in self.vllm_engines
                 ]
 
+            from deepspeed.runtime.utils import get_inactive_params
             if self.strategy.args.zero_stage != 3:
                 # For ZeRO-1/2, broadcast parameter to all vllm engines by rank 0
                 if torch.distributed.get_rank() == 0:
                     torch.distributed.broadcast(param.data, 0, group=self._model_update_group)
             else:
                 # For ZeRO-3, allgather sharded parameter and broadcast to all vllm engines by rank 0
-                with deepspeed.zero.GatheredParameters([param]):
+                nonactive_params = get_inactive_params([param])
+                with deepspeed.zero.GatheredParameters(nonactive_params):
                     if torch.distributed.get_rank() == 0:
                         torch.distributed.broadcast(param.data, 0, group=self._model_update_group)
 
