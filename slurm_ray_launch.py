@@ -498,6 +498,7 @@ def main_start(args):
 
         logger.debug(f"Scheduling Ray cluster...")
 
+        raycluster_slurm_job_name = None
         if n_ray_cluster_nodes > 0:
             job_environs = {**base_environs, **_LLM_ENVVARS}
             ray_cluster_log = os.path.join(LOG_ROOT, expr_name, trial_name, "ray_cluster.log")
@@ -582,10 +583,12 @@ def main_start(args):
         try:
             sched.wait()
         except (KeyboardInterrupt, scheduler.client.JobException, TimeoutError) as e:
-            cancel_jobs([raycluster_slurm_job_name])
+            if raycluster_slurm_job_name is not None:
+                cancel_jobs([raycluster_slurm_job_name])
             sched.stop_all()
             raise e
-        cancel_jobs([raycluster_slurm_job_name])
+        if raycluster_slurm_job_name is not None:
+            cancel_jobs([raycluster_slurm_job_name])
 
 
 def get_path_from_model_size(model_size: int):
@@ -610,10 +613,10 @@ def get_ngpus_and_nodelist_from_model_size(
     if model_size in [7]:
         # actor, critic, ref, rew, vllm-engine
         device_partition = (4, 2, 1, 1, 0)
-        ngpus, nodelist = 8, "QH-com01"
+        ngpus, nodelist = 8, "QH-com44"
     elif model_size == 13:
         device_partition = (8, 4, 2, 2, 0)
-        ngpus, nodelist = 16, "QH-com[09-10]"
+        ngpus, nodelist = 16, "QH-com[13-14]"
     elif model_size in [34]:
         device_partition = (16, 2, 4, 2, 8)
         ngpus, nodelist = 32, "QH-com[25-28]"
