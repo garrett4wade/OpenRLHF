@@ -618,11 +618,11 @@ def get_ngpus_and_nodelist_from_model_size(
         device_partition = (8, 4, 2, 2, 0)
         ngpus, nodelist = 16, "QH-com[13-14]"
     elif model_size in [34]:
-        device_partition = (16, 2, 4, 2, 8)
-        ngpus, nodelist = 32, "QH-com[25-28]"
+        device_partition = (16, 4, 4, 2, 6)
+        ngpus, nodelist = 32, "QH-com[15-18]"
     elif model_size == 70:
-        device_partition = (40, 2, 4, 2, 16)
-        ngpus, nodelist = 64, "QH-com[36-43]"
+        device_partition = (32, 4, 8, 4, 16)
+        ngpus, nodelist = 64, "QH-com[30-34,45-47]"
     assert sum(device_partition) == ngpus, (device_partition, ngpus)
     return ngpus, device_partition, nodelist
 

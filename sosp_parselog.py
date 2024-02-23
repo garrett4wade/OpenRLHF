@@ -22,6 +22,8 @@ def _parselog(
         exp_name += "-of"
     logpath = f"/lustre/aigc/llm/logs/fw/{exp_name}/1/rlhf.log"
     oom = False
+    worker_max_mem = dict()
+    oom_workers = set()
     time_records = []
     tflops_records = []
     thpt_records = []
@@ -30,9 +32,10 @@ def _parselog(
         with open(logpath, "r", errors="ignore") as f:
             lines = f.readlines()
             for line in lines:
-                if "CUDA out of memory" in line:
+                if "ray.exceptions.RayTaskError(OutOfMemoryError)" in line:
                     oom = True
-                    break
+                    oom_workers.add(line.split()[1].strip())
+                    # print(logpath)
                 if "End-to-End" in line:
                     step_time = float(line.split("End-to-End => Latency: ")[1].split("s,")[0])
                     time_records.append(step_time)
@@ -42,6 +45,9 @@ def _parselog(
                     thpt_records.append(thpt)
                 if "Compute Utilization - " in line:
                     mem = float(line.split("Used Memory - ")[1].split("MB,")[0])
+                    if "pid" in line:
+                        worker = line[6:].split(" ")[0]
+                        worker_max_mem[worker] = max(worker_max_mem.get(worker, 0), mem)
                     max_mem = max(max_mem, mem)
     except FileNotFoundError:
         # print(f"File not found: {logpath}")
@@ -66,6 +72,8 @@ def _parselog(
         OOM=oom,
         Throughput=thpt,
         MaxGPUMemory=max_mem,
+        # WorkerMaxMem=worker_max_mem,
+        OOMworker=oom_workers,
     )
     for k, v in d.items():
         benchmark_db[k].append(v)
@@ -79,14 +87,14 @@ def parselog(model_size: int):
         zero_stage = 3
     bszs = range(1, 100)
     seqlens = [256, 512, 1024]
-    offloads = [True, False]
+    offloads = [True]
     for max_answer_len, bs, offload in itertools.product(seqlens, bszs, offloads):
         _parselog(model_size, zero_stage, max_answer_len, bs, offload)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_size", "-x", type=int, default=7, choices=[7, 13, 34, 70], nargs="+")
+    parser.add_argument("--model_size", "-x", type=int, required=True, choices=[7, 13, 34, 70], nargs="+")
     parser.add_argument("--max", action="store_true")
     args = parser.parse_args()
     for model_size in args.model_size:
