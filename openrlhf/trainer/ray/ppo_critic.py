@@ -1,6 +1,7 @@
 import math
 from typing import Dict, Optional
 
+import copy
 import ray
 import torch
 from torch.utils.data import DataLoader, DistributedSampler
@@ -62,6 +63,9 @@ class CriticPPOTrainer(PPOTrainer):
 @ray.remote(num_gpus=1)
 class CriticModelRayActor(BasePPORole):
     def init_model_from_pretrained(self, strategy: DeepspeedStrategy, pretrain, max_steps):
+        strategy = copy.deepcopy(strategy)
+        assert strategy.args.critic_micro_train_batch_size is not None
+        strategy.micro_train_batch_size = strategy.args.critic_micro_train_batch_size
         self._setup_distributed(strategy)
         critic = get_llm_for_sequence_regression(
             pretrain,

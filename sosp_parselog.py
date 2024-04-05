@@ -32,7 +32,7 @@ def _parselog(
         with open(logpath, "r", errors="ignore") as f:
             lines = f.readlines()
             for line in lines:
-                if "ray.exceptions.RayTaskError(OutOfMemoryError)" in line:
+                if "ray.exceptions.RayTaskError(OutOfMemoryError)" in line or "CUDA out of memory" in line:
                     oom = True
                     oom_workers.add(line.split()[1].strip())
                     # print(logpath)
@@ -73,7 +73,7 @@ def _parselog(
         Throughput=thpt,
         MaxGPUMemory=max_mem,
         # WorkerMaxMem=worker_max_mem,
-        OOMworker=oom_workers,
+        # OOMworker=oom_workers,
     )
     for k, v in d.items():
         benchmark_db[k].append(v)
@@ -85,7 +85,7 @@ def parselog(model_size: int):
         zero_stage = 2
     else:
         zero_stage = 3
-    bszs = range(1, 100)
+    bszs = range(1, 200)
     seqlens = [256, 512, 1024]
     offloads = [True]
     for max_answer_len, bs, offload in itertools.product(seqlens, bszs, offloads):

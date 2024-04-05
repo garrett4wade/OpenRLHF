@@ -83,7 +83,7 @@ def print_throughput_step3(actor_hf_config, critic_hf_config,
         critic_hf_config)
 
     seq_length = max_prompt_len + max_answer_len
-    batch_size = args.train_batch_size
+    batch_size = args.rollout_batch_size
     samples_per_second = batch_size / e2e_time
 
     actor_checkpoint_activations_factor = 4 if args.gradient_checkpointing else 3
@@ -346,6 +346,7 @@ class PPOTrainer(ABC):
                 last_gen_time += gen_time
                 last_inf_time += inf_time
                 self.replay_buffer.append(experience)
+                print(">>>> update timesteps", update_timesteps)
 
                 if global_step % update_timesteps == 0:
                     torch.cuda.empty_cache()
@@ -395,6 +396,7 @@ class PPOTrainer(ABC):
             pin_memory=self.dataloader_pin_memory,
             collate_fn=self.replay_buffer.collate_fn,
         )
+        print(f">>>>> train sample batch size {self.replay_buffer.sample_batch_size}, dataloader length {len(dataloader)}")
         device = torch.cuda.current_device()
 
         status_list = []
@@ -451,9 +453,11 @@ class PPOTrainer(ABC):
 
         num_actions = experience.action_mask.size(1)
         # actor loss
+        t1 = time.perf_counter()
         action_log_probs, output = self.actor(
             experience.sequences, num_actions, attention_mask=experience.attention_mask, return_output=True
         )
+        fwd_time = time.perf_counter() - t1
 
         # loss function
         actor_loss = self.actor_loss_fn(
@@ -468,6 +472,7 @@ class PPOTrainer(ABC):
         else:
             aux_loss = 0
         loss = actor_loss + aux_loss * self.args.aux_loss_coef
+        t2 = time.perf_counter()
         self.strategy.backward(loss, self.actor, self.actor_optim)
 
         # ptx loss
@@ -511,18 +516,22 @@ class PPOTrainer(ABC):
                 ).item()
             else:
                 status[k] = v.mean().item()
+        bwd_time = time.perf_counter() - t2
+        print(f">>>> Actor forward time {fwd_time:.2f}s, backward time {bwd_time:.2f}s, #seqs={experience.attention_mask.shape[0]}")
         return status
 
     def training_step_critic(self, experience: Experience) -> Dict[str, float]:
         self.critic.train()
 
         # critic loss
+        t1 = time.perf_counter()
         values, output = self.critic(
             experience.sequences,
             action_mask=experience.action_mask,
             attention_mask=experience.attention_mask,
             return_output=True,
         )
+        fwd_t = time.perf_counter() - t1
         # loss function
         critic_loss = self.critic_loss_fn(
             values,
@@ -535,6 +544,7 @@ class PPOTrainer(ABC):
             aux_loss = output.aux_loss
         else:
             aux_loss = 0
+        t2 = time.perf_counter()
         loss = critic_loss + aux_loss * self.args.aux_loss_coef
         self.strategy.backward(loss, self.critic, self.critic_optim)
         self.strategy.optimizer_step(self.critic_optim, self.critic, self.critic_scheduler, name="critic")
@@ -544,6 +554,8 @@ class PPOTrainer(ABC):
             "critic_loss": critic_loss.item(),
             "values": masked_mean(values, experience.action_mask).item(),
         }
+        bwd_t = time.perf_counter() - t2
+        print(f">>>> critic forward time {fwd_t:.2f}s, backward time {bwd_t:.2f}s, #seqs={experience.attention_mask.shape[0]}")
         return status
 
     def save_logs_and_checkpoints(self, args, global_step, step_bar, logs_dict={}):

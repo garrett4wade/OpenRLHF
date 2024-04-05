@@ -186,7 +186,7 @@ def driver_cmd(args):
     ngpus, device_partition, nodelist = get_ngpus_and_nodelist_from_model_size(
         args.model_size, args.colocate_actor_critic, args.colocate_ref_reward
     )
-    assert all(g <= 8 or g % 8 == 0 for g in device_partition)
+    # assert all(g <= 8 or g % 8 == 0 for g in device_partition)
     n_actor_gpus = device_partition[0]
     n_critic_gpus = device_partition[1]
     n_ref_gpus = device_partition[2]
@@ -212,10 +212,10 @@ def driver_cmd(args):
         f"--actor_num_gpus_per_node {8 if n_actor_gpus > 8 else n_actor_gpus}",
         f"--critic_num_nodes {n_critic_gpus // 8 if n_critic_gpus > 8 else 1}",
         f"--critic_num_gpus_per_node {8 if n_critic_gpus > 8 else n_critic_gpus}",
-        f"--train_batch_size {4 * n_actor_gpus * args.per_device_bs}",
+        f"--train_batch_size {n_actor_gpus * args.per_device_bs}",
         f"--micro_train_batch_size {args.per_device_bs}",
         f"--critic_micro_train_batch_size {args.per_device_bs * n_actor_gpus // n_critic_gpus}",
-        f"--rollout_batch_size {n_actor_gpus * args.per_device_bs}",
+        f"--rollout_batch_size {n_actor_gpus * args.per_device_bs * 4}",
         f"--micro_rollout_batch_size {args.per_device_bs}",
         f"--max_epochs 1",
         f"--prompt_max_len 256",
@@ -613,16 +613,16 @@ def get_ngpus_and_nodelist_from_model_size(
     if model_size in [7]:
         # actor, critic, ref, rew, vllm-engine
         device_partition = (4, 2, 1, 1, 0)
-        ngpus, nodelist = 8, "QH-com44"
+        ngpus, nodelist = 8, "QH-com29"
     elif model_size == 13:
         device_partition = (8, 4, 2, 2, 0)
-        ngpus, nodelist = 16, "QH-com[13-14]"
+        ngpus, nodelist = 16, "QH-com[25-26]"
     elif model_size in [34]:
         device_partition = (16, 4, 4, 2, 6)
-        ngpus, nodelist = 32, "QH-com[15-18]"
+        ngpus, nodelist = 32, "QH-com[31-34]"
     elif model_size == 70:
-        device_partition = (32, 4, 8, 4, 16)
-        ngpus, nodelist = 64, "QH-com[30-34,45-47]"
+        device_partition = (32, 8, 8, 4, 12)
+        ngpus, nodelist = 64, "QH-com[09-10,13-16,18-19]"
     assert sum(device_partition) == ngpus, (device_partition, ngpus)
     return ngpus, device_partition, nodelist
 

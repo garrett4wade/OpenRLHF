@@ -12,53 +12,45 @@ args = parser.parse_args()
 
 interested_settings = [
     # model size 7
-    dict(model_size=7, zero_stage=2, max_answer_len=256, offload=True, bs=28),
-    dict(model_size=7, zero_stage=2, max_answer_len=256, offload=True, bs=30),
-    dict(model_size=7, zero_stage=2, max_answer_len=256, offload=True, bs=34),
-    dict(model_size=7, zero_stage=2, max_answer_len=256, offload=True, bs=36),
-    dict(model_size=7, zero_stage=2, max_answer_len=512, offload=True, bs=28),
-    dict(model_size=7, zero_stage=2, max_answer_len=512, offload=True, bs=30),
-    dict(model_size=7, zero_stage=2, max_answer_len=512, offload=True, bs=34),
-    dict(model_size=7, zero_stage=2, max_answer_len=512, offload=True, bs=36),
-    dict(model_size=7, zero_stage=2, max_answer_len=1024, offload=True, bs=4),
-    dict(model_size=7, zero_stage=2, max_answer_len=1024, offload=True, bs=6),
-    dict(model_size=7, zero_stage=2, max_answer_len=1024, offload=True, bs=8),
-    dict(model_size=7, zero_stage=2, max_answer_len=1024, offload=True, bs=10),
-    dict(model_size=7, zero_stage=2, max_answer_len=1024, offload=True, bs=12),
-    dict(model_size=7, zero_stage=2, max_answer_len=1024, offload=True, bs=14),
+    dict(model_size=7, zero_stage=2, max_answer_len=256, offload=True, bs=64),
+    dict(model_size=7, zero_stage=2, max_answer_len=512, offload=True, bs=32),
+    dict(model_size=7, zero_stage=2, max_answer_len=1024, offload=True, bs=16),
+    dict(model_size=7, zero_stage=3, max_answer_len=256, offload=True, bs=64),
+    dict(model_size=7, zero_stage=3, max_answer_len=512, offload=True, bs=32),
+    dict(model_size=7, zero_stage=3, max_answer_len=1024, offload=True, bs=16),
+    dict(model_size=7, zero_stage=2, max_answer_len=256, offload=False, bs=64),
+    dict(model_size=7, zero_stage=2, max_answer_len=512, offload=False, bs=32),
+    dict(model_size=7, zero_stage=2, max_answer_len=1024, offload=False, bs=16),
+    dict(model_size=7, zero_stage=3, max_answer_len=256, offload=False, bs=64),
+    dict(model_size=7, zero_stage=3, max_answer_len=512, offload=False, bs=32),
+    dict(model_size=7, zero_stage=3, max_answer_len=1024, offload=False, bs=16),
     # model size 13
-    dict(model_size=13, zero_stage=2, max_answer_len=256, offload=True, bs=28),
-    dict(model_size=13, zero_stage=2, max_answer_len=256, offload=True, bs=30),
-    dict(model_size=13, zero_stage=2, max_answer_len=256, offload=True, bs=34),
-    dict(model_size=13, zero_stage=2, max_answer_len=256, offload=True, bs=36),
-    dict(model_size=13, zero_stage=2, max_answer_len=512, offload=True, bs=18),
-    dict(model_size=13, zero_stage=2, max_answer_len=512, offload=True, bs=20),
-    dict(model_size=13, zero_stage=2, max_answer_len=512, offload=True, bs=22),
-    dict(model_size=13, zero_stage=2, max_answer_len=512, offload=True, bs=26),
-    dict(model_size=13, zero_stage=2, max_answer_len=512, offload=True, bs=28),
-    dict(model_size=13, zero_stage=2, max_answer_len=1024, offload=True, bs=6),
+    dict(model_size=13, zero_stage=2, max_answer_len=256, offload=True, bs=32),
+    dict(model_size=13, zero_stage=2, max_answer_len=512, offload=True, bs=16),
     dict(model_size=13, zero_stage=2, max_answer_len=1024, offload=True, bs=8),
-    dict(model_size=13, zero_stage=2, max_answer_len=1024, offload=True, bs=10),
-    dict(model_size=13, zero_stage=2, max_answer_len=1024, offload=True, bs=12),
-    dict(model_size=13, zero_stage=2, max_answer_len=1024, offload=True, bs=14),
+    dict(model_size=13, zero_stage=2, max_answer_len=256, offload=False, bs=32),
+    dict(model_size=13, zero_stage=2, max_answer_len=512, offload=False, bs=16),
+    dict(model_size=13, zero_stage=2, max_answer_len=1024, offload=False, bs=8),
+    dict(model_size=13, zero_stage=3, max_answer_len=256, offload=True, bs=32),
+    dict(model_size=13, zero_stage=3, max_answer_len=512, offload=True, bs=16),
+    dict(model_size=13, zero_stage=3, max_answer_len=1024, offload=True, bs=8),
+    dict(model_size=13, zero_stage=3, max_answer_len=256, offload=False, bs=32),
+    dict(model_size=13, zero_stage=3, max_answer_len=512, offload=False, bs=16),
+    dict(model_size=13, zero_stage=3, max_answer_len=1024, offload=False, bs=8),
     # model size 34
     dict(model_size=34, zero_stage=3, max_answer_len=256, offload=True, bs=16),
-    dict(model_size=34, zero_stage=3, max_answer_len=256, offload=True, bs=24),
-    dict(model_size=34, zero_stage=3, max_answer_len=256, offload=True, bs=32),
-    dict(model_size=34, zero_stage=3, max_answer_len=256, offload=True, bs=48),
-    dict(model_size=34, zero_stage=3, max_answer_len=256, offload=True, bs=64),
-    dict(model_size=34, zero_stage=3, max_answer_len=256, offload=True, bs=80),
-    dict(model_size=34, zero_stage=3, max_answer_len=256, offload=True, bs=96),
-    dict(model_size=34, zero_stage=3, max_answer_len=512, offload=True, bs=12),
-    dict(model_size=34, zero_stage=3, max_answer_len=512, offload=True, bs=16),
-    dict(model_size=34, zero_stage=3, max_answer_len=512, offload=True, bs=24),
-    dict(model_size=34, zero_stage=3, max_answer_len=512, offload=True, bs=32),
-    dict(model_size=34, zero_stage=3, max_answer_len=512, offload=True, bs=48),
-    dict(model_size=34, zero_stage=3, max_answer_len=1024, offload=True, bs=8),
-    dict(model_size=34, zero_stage=3, max_answer_len=1024, offload=True, bs=12),
-    dict(model_size=34, zero_stage=3, max_answer_len=1024, offload=True, bs=16),
-    dict(model_size=34, zero_stage=3, max_answer_len=1024, offload=True, bs=20),
-    dict(model_size=34, zero_stage=3, max_answer_len=1024, offload=True, bs=24),
+    dict(model_size=34, zero_stage=3, max_answer_len=512, offload=True, bs=8),
+    dict(model_size=34, zero_stage=3, max_answer_len=1024, offload=True, bs=4),
+    dict(model_size=34, zero_stage=3, max_answer_len=256, offload=False, bs=16),
+    dict(model_size=34, zero_stage=3, max_answer_len=512, offload=False, bs=8),
+    dict(model_size=34, zero_stage=3, max_answer_len=1024, offload=False, bs=4),
+    # model size 70
+    dict(model_size=70, zero_stage=3, max_answer_len=256, offload=True, bs=8),
+    dict(model_size=70, zero_stage=3, max_answer_len=512, offload=True, bs=4),
+    dict(model_size=70, zero_stage=3, max_answer_len=1024, offload=True, bs=2),
+    dict(model_size=70, zero_stage=3, max_answer_len=256, offload=False, bs=8),
+    dict(model_size=70, zero_stage=3, max_answer_len=512, offload=False, bs=4),
+    dict(model_size=70, zero_stage=3, max_answer_len=1024, offload=False, bs=2),
 ]
 
 
@@ -116,6 +108,9 @@ def sweep(model_size: int):
         if offload:
             exp_name += "-of"
         trial_name = "1"
+        logdir = f"/lustre/aigc/llm/logs/fw/{exp_name}/{trial_name}/"
+        if os.path.exists(logdir):
+            os.system(f"rm -rf {logdir}")
         cmd = (
             f"python3 slurm_ray_launch.py start "
             f" -e {exp_name} -f {trial_name} "
