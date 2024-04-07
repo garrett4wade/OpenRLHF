@@ -5,106 +5,104 @@ import argparse
 
 from sosp_parselog import _parselog
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--model_size", "-x", type=int, choices=[7, 13, 34, 70], required=True, nargs="+")
-parser.add_argument("--force", action="store_true")
-args = parser.parse_args()
 
-interested_settings = [
-    # model size 7
-    dict(model_size=7, zero_stage=2, max_answer_len=256, offload=True, bs=64),
-    dict(model_size=7, zero_stage=2, max_answer_len=512, offload=True, bs=32),
-    dict(model_size=7, zero_stage=2, max_answer_len=1024, offload=True, bs=16),
-    dict(model_size=7, zero_stage=3, max_answer_len=256, offload=True, bs=64),
-    dict(model_size=7, zero_stage=3, max_answer_len=512, offload=True, bs=32),
-    dict(model_size=7, zero_stage=3, max_answer_len=1024, offload=True, bs=16),
-    dict(model_size=7, zero_stage=2, max_answer_len=256, offload=False, bs=64),
-    dict(model_size=7, zero_stage=2, max_answer_len=512, offload=False, bs=32),
-    dict(model_size=7, zero_stage=2, max_answer_len=1024, offload=False, bs=16),
-    dict(model_size=7, zero_stage=3, max_answer_len=256, offload=False, bs=64),
-    dict(model_size=7, zero_stage=3, max_answer_len=512, offload=False, bs=32),
-    dict(model_size=7, zero_stage=3, max_answer_len=1024, offload=False, bs=16),
-    # model size 13
-    dict(model_size=13, zero_stage=2, max_answer_len=256, offload=True, bs=32),
-    dict(model_size=13, zero_stage=2, max_answer_len=512, offload=True, bs=16),
-    dict(model_size=13, zero_stage=2, max_answer_len=1024, offload=True, bs=8),
-    dict(model_size=13, zero_stage=2, max_answer_len=256, offload=False, bs=32),
-    dict(model_size=13, zero_stage=2, max_answer_len=512, offload=False, bs=16),
-    dict(model_size=13, zero_stage=2, max_answer_len=1024, offload=False, bs=8),
-    dict(model_size=13, zero_stage=3, max_answer_len=256, offload=True, bs=32),
-    dict(model_size=13, zero_stage=3, max_answer_len=512, offload=True, bs=16),
-    dict(model_size=13, zero_stage=3, max_answer_len=1024, offload=True, bs=8),
-    dict(model_size=13, zero_stage=3, max_answer_len=256, offload=False, bs=32),
-    dict(model_size=13, zero_stage=3, max_answer_len=512, offload=False, bs=16),
-    dict(model_size=13, zero_stage=3, max_answer_len=1024, offload=False, bs=8),
-    # model size 34
-    dict(model_size=34, zero_stage=3, max_answer_len=256, offload=True, bs=16),
-    dict(model_size=34, zero_stage=3, max_answer_len=512, offload=True, bs=8),
-    dict(model_size=34, zero_stage=3, max_answer_len=1024, offload=True, bs=4),
-    dict(model_size=34, zero_stage=3, max_answer_len=256, offload=False, bs=16),
-    dict(model_size=34, zero_stage=3, max_answer_len=512, offload=False, bs=8),
-    dict(model_size=34, zero_stage=3, max_answer_len=1024, offload=False, bs=4),
-    # model size 70
-    dict(model_size=70, zero_stage=3, max_answer_len=256, offload=True, bs=8),
-    dict(model_size=70, zero_stage=3, max_answer_len=512, offload=True, bs=4),
-    dict(model_size=70, zero_stage=3, max_answer_len=1024, offload=True, bs=2),
-    dict(model_size=70, zero_stage=3, max_answer_len=256, offload=False, bs=8),
-    dict(model_size=70, zero_stage=3, max_answer_len=512, offload=False, bs=4),
-    dict(model_size=70, zero_stage=3, max_answer_len=1024, offload=False, bs=2),
-]
+
+# interested_settings = [
+#     # model size 7
+#     dict(model_size=7, zero_stage=2, max_answer_len=128, offload=True, bs=128),
+#     dict(model_size=7, zero_stage=2, max_answer_len=384, offload=True, bs=64),
+#     dict(model_size=7, zero_stage=2, max_answer_len=896, offload=True, bs=32),
+#     dict(model_size=7, zero_stage=3, max_answer_len=128, offload=True, bs=128),
+#     dict(model_size=7, zero_stage=3, max_answer_len=384, offload=True, bs=64),
+#     dict(model_size=7, zero_stage=3, max_answer_len=896, offload=True, bs=32),
+#     dict(model_size=7, zero_stage=2, max_answer_len=128, offload=False, bs=128),
+#     dict(model_size=7, zero_stage=2, max_answer_len=384, offload=False, bs=64),
+#     dict(model_size=7, zero_stage=2, max_answer_len=896, offload=False, bs=32),
+#     dict(model_size=7, zero_stage=3, max_answer_len=128, offload=False, bs=128),
+#     dict(model_size=7, zero_stage=3, max_answer_len=384, offload=False, bs=64),
+#     dict(model_size=7, zero_stage=3, max_answer_len=896, offload=False, bs=32),
+#     # model size 13
+#     dict(model_size=13, zero_stage=2, max_answer_len=128, offload=True, bs=64),
+#     dict(model_size=13, zero_stage=2, max_answer_len=384, offload=True, bs=32),
+#     dict(model_size=13, zero_stage=2, max_answer_len=896, offload=True, bs=16),
+#     dict(model_size=13, zero_stage=2, max_answer_len=128, offload=False, bs=64),
+#     dict(model_size=13, zero_stage=2, max_answer_len=384, offload=False, bs=32),
+#     dict(model_size=13, zero_stage=2, max_answer_len=896, offload=False, bs=16),
+#     dict(model_size=13, zero_stage=3, max_answer_len=128, offload=True, bs=64),
+#     dict(model_size=13, zero_stage=3, max_answer_len=384, offload=True, bs=32),
+#     dict(model_size=13, zero_stage=3, max_answer_len=896, offload=True, bs=16),
+#     dict(model_size=13, zero_stage=3, max_answer_len=128, offload=False, bs=64),
+#     dict(model_size=13, zero_stage=3, max_answer_len=384, offload=False, bs=32),
+#     dict(model_size=13, zero_stage=3, max_answer_len=896, offload=False, bs=16),
+#     # model size 34
+#     dict(model_size=34, zero_stage=3, max_answer_len=128, offload=True, bs=32),
+#     dict(model_size=34, zero_stage=3, max_answer_len=384, offload=True, bs=16),
+#     dict(model_size=34, zero_stage=3, max_answer_len=896, offload=True, bs=8),
+#     dict(model_size=34, zero_stage=3, max_answer_len=128, offload=False, bs=32),
+#     dict(model_size=34, zero_stage=3, max_answer_len=384, offload=False, bs=16),
+#     dict(model_size=34, zero_stage=3, max_answer_len=896, offload=False, bs=8),
+#     # model size 70
+#     dict(model_size=70, zero_stage=3, max_answer_len=128, offload=True, bs=16),
+#     dict(model_size=70, zero_stage=3, max_answer_len=384, offload=True, bs=8),
+#     dict(model_size=70, zero_stage=3, max_answer_len=896, offload=True, bs=4),
+#     dict(model_size=70, zero_stage=3, max_answer_len=128, offload=False, bs=16),
+#     dict(model_size=70, zero_stage=3, max_answer_len=384, offload=False, bs=8),
+#     dict(model_size=70, zero_stage=3, max_answer_len=896, offload=False, bs=4),
+# ]
+interested_settings = []
+for model_size in [7, 13, 34, 70]:
+    if model_size <= 13:
+        zero_stages = [2]
+    else:
+        zero_stages = [3]
+    for zero_stage, offload, (global_bs, genlen) in itertools.product(
+        zero_stages, [False, True], [(128, 896), (256, 384), (512, 128)]
+    ):
+        assert global_bs * (128 + genlen) == 2**17
+        interested_settings.append(
+            dict(
+                model_size=model_size,
+                zero_stage=zero_stage,
+                max_answer_len=genlen,
+                bs=global_bs,
+                offload=offload,
+            )
+        )
 
 
 def build_default_sweep_settings(model_size: int):
     settings = []
-    seqlens = [256, 512, 1024]
-    if model_size >= 34:
-        zero_stages = [3]
-    else:
-        zero_stages = [2]
-    for offload in [True]:
-        if not offload:
-            gen_batch_sizes = [64, 48, 32, 24]
-        else:
-            gen_batch_sizes = list(reversed([32, 48, 64, 80, 96, 120]))
-        for zero_stage, max_answer_len, gen_bs in itertools.product(zero_stages, seqlens, gen_batch_sizes):
-            settings.append(
-                dict(
-                    model_size=model_size,
-                    zero_stage=zero_stage,
-                    max_answer_len=max_answer_len,
-                    bs=gen_bs,
-                    offload=offload,
-                )
-            )
     return settings
 
 
-def sweep(model_size: int):
+def sweep(model_size: int, scale_actor: bool, scale_critic: bool, verbose_only: bool):
+    actor_size = model_size if scale_actor else 7
+    critic_size = model_size if scale_critic else 7
     global interested_settings
     interested_settings = list(filter(lambda x: x["model_size"] == model_size, interested_settings))
+    assert len(interested_settings) > 0
     if len(interested_settings) == 0:
         settings = list(
             filter(lambda x: x["model_size"] == model_size, build_default_sweep_settings(model_size))
         )
         assert len(settings) > 0
         print(
-            f">>>>>>>>>>>>>>>> No interested settings for model size {model_size} found. Using default {len(settings)} settings. <<<<<<<<<<<<<<<<"
+            f">>>>>>>>>>>>>>>> No interested settings for actor {actor_size} critic {critic_size} found. Using default {len(settings)} settings. <<<<<<<<<<<<<<<<"
         )
     else:
         settings = interested_settings
         print(
-            f">>>>>>>>>>>>>>>> Found interested settings for model size {model_size}! Run interested {len(settings)} settings only. <<<<<<<<<<<<<<<<"
+            f">>>>>>>>>>>>>>>> Found interested settings for actor {actor_size} critic {critic_size}! Run interested {len(settings)} settings only. <<<<<<<<<<<<<<<<"
         )
     for setting in settings:
-        assert model_size == setting["model_size"]
         zero_stage = setting["zero_stage"]
         max_answer_len = setting["max_answer_len"]
         bs = setting["bs"]
         offload = setting["offload"]
-        if not args.force and _parselog(model_size, zero_stage, max_answer_len, bs, offload):
+        if not args.force and _parselog(actor_size, critic_size, zero_stage, max_answer_len, bs, offload):
             continue
 
-        exp_name = f"or-a{model_size}s{max_answer_len // 100}g{bs}"
+        exp_name = f"or-a{actor_size}c{critic_size}s{max_answer_len // 100}g{bs // 100}"
         if offload:
             exp_name += "-of"
         trial_name = "1"
@@ -117,14 +115,28 @@ def sweep(model_size: int):
             f"--model_size {model_size} "
             f"--zero_stage {zero_stage} "
             f"--seqlen {max_answer_len} "
-            f"--per_device_bs {bs} "
+            f"--global_bs {bs} "
         )
         if offload:
             cmd += "--offload "
-        os.system(cmd)
-        # print(cmd)
+        if scale_actor:
+            cmd += "--scale_actor "
+        if scale_critic:
+            cmd += "--scale_critic "
+        if verbose_only:
+            print(cmd)
+        else:
+            os.system(cmd)
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model_size", "-x", type=int, choices=[7, 13, 34, 70], required=True, nargs="+")
+    parser.add_argument("--scale_actor", "-a", action='store_true')
+    parser.add_argument("--scale_critic", "-c", action='store_true')
+    parser.add_argument("--force", "-f", action="store_true")
+    parser.add_argument("--verbose_only", '-v', action='store_true')
+    args = parser.parse_args()
+    assert args.scale_actor or args.scale_critic
     for model_size in args.model_size:
-        sweep(model_size)
+        sweep(model_size, args.scale_actor, args.scale_critic, args.verbose_only)

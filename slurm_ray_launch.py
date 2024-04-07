@@ -183,8 +183,12 @@ class Scheduling:
 
 
 def driver_cmd(args):
-    ngpus, device_partition, nodelist = get_ngpus_and_nodelist_from_model_size(
-        args.model_size, args.colocate_actor_critic, args.colocate_ref_reward
+    ngpus, device_partition, nodelist, colocate_actor_critic, colocate_ref_reward = (
+        get_ngpus_and_nodelist_from_model_size(
+            args.model_size,
+            scale_actor=args.scale_actor,
+            scale_critic=args.scale_critic,
+        )
     )
     # assert all(g <= 8 or g % 8 == 0 for g in device_partition)
     n_actor_gpus = device_partition[0]
@@ -192,17 +196,21 @@ def driver_cmd(args):
     n_ref_gpus = device_partition[2]
     n_rew_gpus = device_partition[3]
     n_vllm_engines_gpus = device_partition[4]
-    if args.colocate_actor_critic:
+    if colocate_actor_critic:
         assert n_actor_gpus == n_critic_gpus
         actor_critic_gpus = n_actor_gpus
     else:
         actor_critic_gpus = n_actor_gpus + n_critic_gpus
-    if args.colocate_ref_reward:
+    if colocate_ref_reward:
         assert n_ref_gpus == n_rew_gpus
         ref_rew_gpus = n_ref_gpus
     else:
         ref_rew_gpus = n_ref_gpus + n_rew_gpus
     cmd = ["python3", "train_ppo_ray.py"]
+    actor_per_device_bs = args.global_bs // n_actor_gpus
+    critic_per_device_bs = args.global_bs // n_critic_gpus
+    assert actor_per_device_bs // 4 > 0
+    assert critic_per_device_bs // 4 > 0
     flags = [
         f"--ref_num_nodes {n_ref_gpus // 8 if n_ref_gpus > 8 else 1}",
         f"--ref_num_gpus_per_node {8 if n_ref_gpus > 8 else n_ref_gpus}",
@@ -212,13 +220,13 @@ def driver_cmd(args):
         f"--actor_num_gpus_per_node {8 if n_actor_gpus > 8 else n_actor_gpus}",
         f"--critic_num_nodes {n_critic_gpus // 8 if n_critic_gpus > 8 else 1}",
         f"--critic_num_gpus_per_node {8 if n_critic_gpus > 8 else n_critic_gpus}",
-        f"--train_batch_size {n_actor_gpus * args.per_device_bs}",
-        f"--micro_train_batch_size {args.per_device_bs}",
-        f"--critic_micro_train_batch_size {args.per_device_bs * n_actor_gpus // n_critic_gpus}",
-        f"--rollout_batch_size {n_actor_gpus * args.per_device_bs * 4}",
-        f"--micro_rollout_batch_size {args.per_device_bs}",
+        f"--train_batch_size {n_actor_gpus * actor_per_device_bs // 4}",
+        f"--micro_train_batch_size {actor_per_device_bs // 4}",
+        f"--critic_micro_train_batch_size {critic_per_device_bs // 4}",
+        f"--rollout_batch_size {n_actor_gpus * actor_per_device_bs}",
+        f"--micro_rollout_batch_size {actor_per_device_bs}",
         f"--max_epochs 1",
-        f"--prompt_max_len 256",
+        f"--prompt_max_len 128",
         f"--generate_max_len {args.seqlen}",
         f"--zero_stage {args.zero_stage}",
         "--normalize_reward",
@@ -247,66 +255,6 @@ def driver_cmd(args):
         flags.append(f"--vllm_num_engines {n_vllm_engines}")
         flags.append(f"--vllm_tensor_parallel_size {vllm_tp_size}")
     return " ".join(cmd + flags)
-
-
-# def build_train_args(args):
-#     train_args = args
-#     print(">>> after get train args")
-
-#     ngpus, device_partition, nodelist = get_ngpus_and_nodelist_from_model_size(
-#         args.model_size, args.colocate_actor_critic, args.colocate_ref_reward
-#     )
-#     assert all(g <= 8 or g % 8 == 0 for g in device_partition)
-#     n_actor_gpus = device_partition[0]
-#     n_critic_gpus = device_partition[1]
-#     n_ref_gpus = device_partition[2]
-#     n_rew_gpus = device_partition[3]
-#     n_vllm_engines_gpus = device_partition[4]
-
-#     train_args.ref_num_nodes = n_ref_gpus // 8 if n_ref_gpus > 8 else 1
-#     train_args.ref_num_gpus_per_node = 8 if n_ref_gpus > 8 else n_ref_gpus
-#     train_args.reward_num_nodes = n_rew_gpus // 8 if n_rew_gpus > 8 else 1
-#     train_args.reward_num_gpus_per_node = 8 if n_rew_gpus > 8 else n_rew_gpus
-#     train_args.actor_num_nodes = n_actor_gpus // 8 if n_actor_gpus > 8 else 1
-#     train_args.actor_num_gpus_per_node = 8 if n_actor_gpus > 8 else n_actor_gpus
-#     train_args.critic_num_nodes = n_critic_gpus // 8 if n_critic_gpus > 8 else 1
-#     train_args.critic_num_gpus_per_node = 8 if n_critic_gpus > 8 else n_critic_gpus
-
-#     train_args.train_batch_size = 4 * n_actor_gpus * args.per_device_bs
-#     train_args.micro_train_batch_size = args.per_device_bs
-#     train_args.critic_micro_train_batch_size = args.per_device_bs * n_actor_gpus // n_critic_gpus
-#     train_args.rollout_batch_size = n_actor_gpus * args.per_device_bs
-
-#     train_args.max_epochs = 1
-#     train_args.prompt_max_len = 256
-#     train_args.generate_max_len = args.seqlen
-#     train_args.zero_stage = args.zero_stage
-
-#     train_args.normalize_reward = True
-#     train_args.actor_init_on_gpu = True
-#     train_args.flash_attn = True
-#     train_args.gradient_checkpointing = True
-
-#     if args.offload:
-#         train_args.adam_offload = True
-
-#     model_path = get_path_from_model_size(args.model_size)
-#     train_args.pretrain = model_path
-#     train_args.reward_pretrain = "/lustre/public/pretrained_model_weights/Llama-2-7b-hf"
-
-#     if args.zero_stage == 3:
-#         train_args.bf16 = True
-#     if n_vllm_engines_gpus > 0:
-#         if args.model_size <= 13:
-#             vllm_tp_size = 1
-#         elif args.model_size == 34:
-#             vllm_tp_size = 2
-#         elif args.model_size == 70:
-#             vllm_tp_size = 4
-#         assert n_vllm_engines_gpus % vllm_tp_size == 0
-#         n_vllm_engines = n_vllm_engines_gpus // vllm_tp_size
-#         train_args.vllm_num_engines = n_vllm_engines
-#     return train_args
 
 
 def control_cmd(expr_name, trial_name, local_mode):
@@ -363,8 +311,10 @@ def main_ray_driver(args):
         raise RuntimeError(f"Address not found in ray start output: {output}.")
 
     # For slurm model, launch the Ray cluster via slurm command.
-    ngpus, _, _ = get_ngpus_and_nodelist_from_model_size(
-        args.model_size, args.colocate_actor_critic, args.colocate_ref_reward
+    ngpus, _, _, colocate_actor_critic, colocate_ref_reward = get_ngpus_and_nodelist_from_model_size(
+        args.model_size,
+        scale_actor=args.scale_actor,
+        scale_critic=args.scale_critic,
     )
     assert ngpus % 8 == 0
 
@@ -450,6 +400,12 @@ def main_start(args):
         raise e
     logger.info(f"Resetting name resolving repo... Done.")
 
+    ngpus, _, nodelist, colocate_actor_critic, colocate_ref_reward = get_ngpus_and_nodelist_from_model_size(
+        args.model_size,
+        scale_actor=args.scale_actor,
+        scale_critic=args.scale_critic,
+    )
+
     if args.mode == "local":
         main_ray_driver(args)
     else:
@@ -462,18 +418,16 @@ def main_start(args):
                 f"-f {args.trial_name}",
                 f"--model_size {args.model_size}",
                 f"--mode {args.mode}",
-                f"--per_device_bs {args.per_device_bs}",
+                f"--global_bs {args.global_bs}",
                 f"--zero_stage {args.zero_stage}",
                 f"--offload" if args.offload else "",
                 f"--seqlen {args.seqlen}",
-                "--colocate_ref_reward" if args.colocate_ref_reward else "",
-                "--colocate_actor_critic" if args.colocate_actor_critic else "",
+                "--colocate_ref_reward" if colocate_ref_reward else "",
+                "--colocate_actor_critic" if colocate_actor_critic else "",
                 # f"--ray_port {ray_port}",
             ]
         )
-        ngpus, _, nodelist = get_ngpus_and_nodelist_from_model_size(
-            args.model_size, args.colocate_actor_critic, args.colocate_ref_reward
-        )
+
         assert ngpus % 8 == 0
         n_ray_cluster_nodes = ngpus // 8 - 1
 
@@ -606,25 +560,52 @@ def get_path_from_model_size(model_size: int):
 
 
 def get_ngpus_and_nodelist_from_model_size(
-    model_size: int, colocate_actor_critic: bool, colocate_ref_reward: bool
+    model_size: int,
+    scale_actor: bool,
+    scale_critic: bool,
 ):
-    assert not colocate_actor_critic
-    assert not colocate_ref_reward
+    assert scale_critic or scale_actor
+    colocate_actor_critic = False
+    colocate_ref_reward = False
     if model_size in [7]:
         # actor, critic, ref, rew, vllm-engine
-        device_partition = (4, 2, 1, 1, 0)
-        ngpus, nodelist = 8, "QH-com29"
+        if scale_actor and not scale_critic:
+            device_partition = (4, 2, 1, 1, 0)
+        elif scale_critic and not scale_actor:
+            device_partition = (2, 4, 1, 1, 0)
+        else:
+            colocate_actor_critic = True
+            device_partition = (4, 4, 1, 1, 2)
+        ngpus, nodelist = 8, "QH-com22"
     elif model_size == 13:
-        device_partition = (8, 4, 2, 2, 0)
-        ngpus, nodelist = 16, "QH-com[25-26]"
+        if scale_actor and not scale_critic:
+            device_partition = (8, 4, 2, 2, 0)
+        elif scale_critic and not scale_actor:
+            device_partition = (4, 8, 2, 2, 0)
+        else:
+            colocate_actor_critic = True
+            device_partition = (8, 8, 2, 2, 4)
+        ngpus, nodelist = 16, "QH-com[43-44]"
     elif model_size in [34]:
-        device_partition = (16, 4, 4, 2, 6)
-        ngpus, nodelist = 32, "QH-com[31-34]"
+        if scale_actor and not scale_critic:
+            device_partition = (16, 4, 4, 2, 6)
+        elif scale_critic and not scale_actor:
+            device_partition = (4, 16, 2, 4, 6)
+        else:
+            colocate_actor_critic = True
+            device_partition = (16, 16, 4, 8, 4)
+        ngpus, nodelist = 32, "QH-com[45-48]"
     elif model_size == 70:
-        device_partition = (32, 8, 8, 4, 12)
+        if scale_actor and not scale_critic:
+            device_partition = (32, 8, 8, 4, 12)
+        elif scale_critic and not scale_actor:
+            device_partition = (8, 32, 4, 8, 12)
+        else:
+            colocate_actor_critic = True
+            device_partition = (48, 48, 4, 8, 4)
         ngpus, nodelist = 64, "QH-com[09-10,13-16,18-19]"
     assert sum(device_partition) == ngpus, (device_partition, ngpus)
-    return ngpus, device_partition, nodelist
+    return ngpus, device_partition, nodelist, colocate_actor_critic, colocate_ref_reward
 
 
 if __name__ == "__main__":
@@ -637,23 +618,13 @@ if __name__ == "__main__":
     subparser.add_argument("--trial_name", "-f", type=str, required=True)
     subparser.add_argument("--mode", default="slurm", choices=["local", "slurm"])
 
-    subparser.add_argument(
-        "--colocate_actor_critic",
-        action="store_true",
-        default=False,
-        help="whether to colocate actor and critic model, if true, they will share same gpus.",
-    )
-    subparser.add_argument(
-        "--colocate_ref_reward",
-        action="store_true",
-        default=False,
-        help="whether to colocate reference and reward model, if true, they will share same gpus.",
-    )
     subparser.add_argument("--model_size", type=int, choices=[7, 13, 34, 70], required=True)
-    subparser.add_argument("--per_device_bs", type=int, default=4)
+    subparser.add_argument("--global_bs", type=int, default=4)
     subparser.add_argument("--offload", action="store_true")
     subparser.add_argument("--zero_stage", type=int, default=2)
     subparser.add_argument("--seqlen", type=int, default=256)
+    subparser.add_argument("--scale_actor", action="store_true")
+    subparser.add_argument("--scale_critic", action="store_true")
     subparser.set_defaults(func=main_start)
 
     subparser = subparsers.add_parser("driver", help="launch ray cluster and run workers")
@@ -662,22 +633,12 @@ if __name__ == "__main__":
     subparser.add_argument("--mode", default="slurm", choices=["local", "slurm"])
 
     subparser.add_argument("--model_size", type=int, choices=[7, 13, 34, 70], required=True)
-    subparser.add_argument("--per_device_bs", type=int, default=4)
+    subparser.add_argument("--global_bs", type=int, default=4)
     subparser.add_argument("--offload", action="store_true")
     subparser.add_argument("--seqlen", type=int, default=256)
     subparser.add_argument("--zero_stage", type=int, default=2)
-    subparser.add_argument(
-        "--colocate_actor_critic",
-        action="store_true",
-        default=False,
-        help="whether to colocate actor and critic model, if true, they will share same gpus.",
-    )
-    subparser.add_argument(
-        "--colocate_ref_reward",
-        action="store_true",
-        default=False,
-        help="whether to colocate reference and reward model, if true, they will share same gpus.",
-    )
+    subparser.add_argument("--scale_actor", action="store_true")
+    subparser.add_argument("--scale_critic", action="store_true")
 
     # subparser.add_argument("--ray_port", type=int, required=True)
     subparser.set_defaults(func=main_ray_driver)
