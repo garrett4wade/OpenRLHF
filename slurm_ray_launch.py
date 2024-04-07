@@ -234,6 +234,10 @@ def driver_cmd(args):
         "--flash_attn",
         "--gradient_checkpointing",
     ]
+    if colocate_actor_critic:
+        flags.append("--colocate_actor_critic")
+    if colocate_ref_reward:
+        flags.append("--colocate_ref_reward")
     if args.offload:
         flags.append("--adam_offload")
     model_path = get_path_from_model_size(args.model_size)
@@ -422,8 +426,8 @@ def main_start(args):
                 f"--zero_stage {args.zero_stage}",
                 f"--offload" if args.offload else "",
                 f"--seqlen {args.seqlen}",
-                "--colocate_ref_reward" if colocate_ref_reward else "",
-                "--colocate_actor_critic" if colocate_actor_critic else "",
+                "--scale_actor" if args.scale_actor else "",
+                "--scale_critic" if args.scale_critic else "",
                 # f"--ray_port {ray_port}",
             ]
         )
@@ -571,8 +575,6 @@ def get_ngpus_and_nodelist_from_model_size(
         # actor, critic, ref, rew, vllm-engine
         if scale_actor and not scale_critic:
             device_partition = (4, 2, 1, 1, 0)
-        elif scale_critic and not scale_actor:
-            device_partition = (2, 4, 1, 1, 0)
         else:
             colocate_actor_critic = True
             device_partition = (4, 4, 1, 1, 2)
@@ -580,31 +582,33 @@ def get_ngpus_and_nodelist_from_model_size(
     elif model_size == 13:
         if scale_actor and not scale_critic:
             device_partition = (8, 4, 2, 2, 0)
-        elif scale_critic and not scale_actor:
-            device_partition = (4, 8, 2, 2, 0)
         else:
             colocate_actor_critic = True
             device_partition = (8, 8, 2, 2, 4)
-        ngpus, nodelist = 16, "QH-com[43-44]"
+        ngpus, nodelist = 16, "QH-com[22,24]"
     elif model_size in [34]:
         if scale_actor and not scale_critic:
             device_partition = (16, 4, 4, 2, 6)
-        elif scale_critic and not scale_actor:
-            device_partition = (4, 16, 2, 4, 6)
         else:
             colocate_actor_critic = True
             device_partition = (16, 16, 4, 8, 4)
-        ngpus, nodelist = 32, "QH-com[45-48]"
+        ngpus, nodelist = 32, "QH-com[41,46-48]"
     elif model_size == 70:
         if scale_actor and not scale_critic:
             device_partition = (32, 8, 8, 4, 12)
-        elif scale_critic and not scale_actor:
-            device_partition = (8, 32, 4, 8, 12)
         else:
             colocate_actor_critic = True
             device_partition = (48, 48, 4, 8, 4)
-        ngpus, nodelist = 64, "QH-com[09-10,13-16,18-19]"
-    assert sum(device_partition) == ngpus, (device_partition, ngpus)
+        ngpus, nodelist = 64, "QH-com[25,27-29,42-45]"
+    if colocate_actor_critic:
+        actor_critic_gpus = device_partition[0]
+    else:
+        actor_critic_gpus = device_partition[0] + device_partition[1]
+    if colocate_ref_reward:
+        ref_rew_gpus = device_partition[2]
+    else:
+        ref_rew_gpus = device_partition[2] + device_partition[3]
+    assert ngpus == actor_critic_gpus + ref_rew_gpus + device_partition[4]
     return ngpus, device_partition, nodelist, colocate_actor_critic, colocate_ref_reward
 
 

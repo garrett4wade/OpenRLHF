@@ -11,13 +11,14 @@ benchmark_db = defaultdict(list)
 
 
 def _parselog(
-    model_size: int,
+    actor_size: int,
+    critic_size: int,
     zero_stage: int,
     seqlen: int,
     bs: int,
     offload: bool,
 ):
-    exp_name = f"or-a{model_size}s{seqlen // 100}g{bs}"
+    exp_name = f"or-a{actor_size}c{critic_size}s{seqlen // 100}g{bs//100}"
     if offload:
         exp_name += "-of"
     logpath = f"/lustre/aigc/llm/logs/fw/{exp_name}/1/rlhf.log"
@@ -64,7 +65,8 @@ def _parselog(
         thpt = -float("inf")
         max_mem = 0.0
     d = dict(
-        model_size=model_size,
+        actor_size=actor_size,
+        critic_size=critic_size,
         zero_stage=zero_stage,
         seqlen=seqlen,
         bs=bs,
@@ -72,36 +74,45 @@ def _parselog(
         OOM=oom,
         Throughput=thpt,
         MaxGPUMemory=max_mem,
+        avg_time=avg_time,
         # WorkerMaxMem=worker_max_mem,
         # OOMworker=oom_workers,
+        gpu_scale_factor=1,
     )
     for k, v in d.items():
         benchmark_db[k].append(v)
     return True
 
 
-def parselog(model_size: int):
-    if model_size <= 13:
-        zero_stage = 2
-    else:
-        zero_stage = 3
-    bszs = range(1, 200)
-    seqlens = [256, 512, 1024]
-    offloads = [True]
-    for max_answer_len, bs, offload in itertools.product(seqlens, bszs, offloads):
-        _parselog(model_size, zero_stage, max_answer_len, bs, offload)
+def parselog(actor_size: int, critic_size: int):
+    zero_stages = [2, 3]
+    bszs_seqlens = [(128, 896), (256, 384), (512, 128)]
+    offloads = [True, False]
+    for (global_bs, seqlen), offload, zero_stage in itertools.product(bszs_seqlens, offloads, zero_stages):
+        _parselog(actor_size, critic_size, zero_stage, seqlen, global_bs, offload)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_size", "-x", type=int, required=True, choices=[7, 13, 34, 70], nargs="+")
+    parser.add_argument(
+        "--actor_size", "-a", type=int, default=[7, 13, 34, 70], choices=[7, 13, 34, 70], nargs="+"
+    )
+    parser.add_argument(
+        "--critic_size", "-c", type=int, default=[7, 13, 34, 70], choices=[7, 13, 34, 70], nargs="+"
+    )
     parser.add_argument("--max", action="store_true")
+    parser.add_argument("--dump_to_file", type=str, default=None)
+    parser.add_argument("--no_print", action="store_true")
     args = parser.parse_args()
-    for model_size in args.model_size:
-        parselog(model_size)
+    for actor_size, critic_size in itertools.product(args.actor_size, args.critic_size):
+        parselog(actor_size, critic_size)
     df = pd.DataFrame(benchmark_db)
-    if not args.max:
+    if args.max:
+        df = df.loc[df.groupby(["actor_size", "critic_size", "seqlen"])["Throughput"].idxmax()]
+    if not args.no_print:
         print(df.to_string(index=False))
-    else:
-        max_throughput_df = df.loc[df.groupby(["model_size", "seqlen"])["Throughput"].idxmax()]
-        print(max_throughput_df.to_string(index=False))
+    if args.dump_to_file is not None:
+        import pickle
+
+        with open(args.dump_to_file, "wb") as f:
+            pickle.dump(df, f)
