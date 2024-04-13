@@ -28,6 +28,67 @@ from base.constants import (
 logger = logging.getLogger("main", "system")
 WORKER_TYPE = "default-ray-cluster"
 
+def get_default_n_gpus(model_size: int):
+    if model_size == 7:
+        return 8
+    elif model_size == 13:
+        return 16
+    elif model_size == 34:
+        return 32
+    elif model_size == 70:
+        return 64
+    else:
+        raise NotImplementedError()
+
+
+def get_nodelist_and_device_partition(
+    n_gpus: int,
+    scale_actor: bool,
+    scale_critic: bool,
+):
+    assert scale_critic or scale_actor
+    colocate_actor_critic = False
+    colocate_ref_reward = False
+    if n_gpus == 8:
+        # actor, critic, ref, rew, vllm-engine
+        if scale_actor and not scale_critic:
+            device_partition = (4, 2, 1, 1, 0)
+        else:
+            colocate_actor_critic = True
+            device_partition = (4, 4, 1, 1, 2)
+        nodelist = "QH-com17"
+    elif n_gpus == 16:
+        if scale_actor and not scale_critic:
+            device_partition = (8, 4, 2, 2, 0)
+        else:
+            colocate_actor_critic = True
+            device_partition = (8, 8, 2, 2, 4)
+        nodelist = "QH-com[17-18]"
+    elif n_gpus == 32:
+        if scale_actor and not scale_critic:
+            device_partition = (16, 4, 4, 2, 6)
+        else:
+            colocate_actor_critic = True
+            device_partition = (16, 16, 4, 8, 4)
+        nodelist = "QH-com[17-20]"
+    elif n_gpus == 64:
+        if scale_actor and not scale_critic:
+            device_partition = (32, 8, 8, 4, 12)
+        else:
+            colocate_actor_critic = True
+            device_partition = (32, 32, 8, 8, 16)
+        nodelist = "QH-com[15,17-21,24-25]"
+    if colocate_actor_critic:
+        actor_critic_gpus = device_partition[0]
+    else:
+        actor_critic_gpus = device_partition[0] + device_partition[1]
+    if colocate_ref_reward:
+        ref_rew_gpus = device_partition[2]
+    else:
+        ref_rew_gpus = device_partition[2] + device_partition[3]
+    assert n_gpus == actor_critic_gpus + ref_rew_gpus + device_partition[4], (device_partition, n_gpus)
+    return device_partition, nodelist, colocate_actor_critic, colocate_ref_reward
+
 
 def get_random_port(min_port=1024, max_port=49151):
     while True:
@@ -183,9 +244,12 @@ class Scheduling:
 
 
 def driver_cmd(args):
-    ngpus, device_partition, nodelist, colocate_actor_critic, colocate_ref_reward = (
-        get_ngpus_and_nodelist_from_model_size(
-            args.model_size,
+    assert args.n_gpus is None or isinstance(args.n_gpus, int)
+    if args.n_gpus is None:
+        args.n_gpus = get_default_n_gpus(args.model_size)
+    device_partition, nodelist, colocate_actor_critic, colocate_ref_reward = (
+        get_nodelist_and_device_partition(
+            args.n_gpus,
             scale_actor=args.scale_actor,
             scale_critic=args.scale_critic,
         )
@@ -315,11 +379,10 @@ def main_ray_driver(args):
         raise RuntimeError(f"Address not found in ray start output: {output}.")
 
     # For slurm model, launch the Ray cluster via slurm command.
-    ngpus, _, _, colocate_actor_critic, colocate_ref_reward = get_ngpus_and_nodelist_from_model_size(
-        args.model_size,
-        scale_actor=args.scale_actor,
-        scale_critic=args.scale_critic,
-    )
+    assert args.n_gpus is None or isinstance(args.n_gpus, int)
+    if args.n_gpus  is None:
+        args.n_gpus = get_default_n_gpus(args.model_size)
+    ngpus = args.n_gpus
     assert ngpus % 8 == 0
 
     controller = RayController(
@@ -404,11 +467,17 @@ def main_start(args):
         raise e
     logger.info(f"Resetting name resolving repo... Done.")
 
-    ngpus, _, nodelist, colocate_actor_critic, colocate_ref_reward = get_ngpus_and_nodelist_from_model_size(
-        args.model_size,
-        scale_actor=args.scale_actor,
-        scale_critic=args.scale_critic,
+    assert args.n_gpus is None or isinstance(args.n_gpus, int)
+    if args.n_gpus  is None:
+        args.n_gpus = get_default_n_gpus(args.model_size)
+    device_partition, nodelist, colocate_actor_critic, colocate_ref_reward = (
+        get_nodelist_and_device_partition(
+            args.n_gpus,
+            scale_actor=args.scale_actor,
+            scale_critic=args.scale_critic,
+        )
     )
+    ngpus = args.n_gpus
 
     if args.mode == "local":
         main_ray_driver(args)
@@ -428,6 +497,7 @@ def main_start(args):
                 f"--seqlen {args.seqlen}",
                 "--scale_actor" if args.scale_actor else "",
                 "--scale_critic" if args.scale_critic else "",
+                f"--n_gpus {args.n_gpus}",
                 # f"--ray_port {ray_port}",
             ]
         )
@@ -563,53 +633,7 @@ def get_path_from_model_size(model_size: int):
     return model_path
 
 
-def get_ngpus_and_nodelist_from_model_size(
-    model_size: int,
-    scale_actor: bool,
-    scale_critic: bool,
-):
-    assert scale_critic or scale_actor
-    colocate_actor_critic = False
-    colocate_ref_reward = False
-    if model_size in [7]:
-        # actor, critic, ref, rew, vllm-engine
-        if scale_actor and not scale_critic:
-            device_partition = (4, 2, 1, 1, 0)
-        else:
-            colocate_actor_critic = True
-            device_partition = (4, 4, 1, 1, 2)
-        ngpus, nodelist = 8, "QH-com22"
-    elif model_size == 13:
-        if scale_actor and not scale_critic:
-            device_partition = (8, 4, 2, 2, 0)
-        else:
-            colocate_actor_critic = True
-            device_partition = (8, 8, 2, 2, 4)
-        ngpus, nodelist = 16, "QH-com[22,24]"
-    elif model_size in [34]:
-        if scale_actor and not scale_critic:
-            device_partition = (16, 4, 4, 2, 6)
-        else:
-            colocate_actor_critic = True
-            device_partition = (16, 16, 4, 8, 4)
-        ngpus, nodelist = 32, "QH-com[41,46-48]"
-    elif model_size == 70:
-        if scale_actor and not scale_critic:
-            device_partition = (32, 8, 8, 4, 12)
-        else:
-            colocate_actor_critic = True
-            device_partition = (48, 48, 4, 8, 4)
-        ngpus, nodelist = 64, "QH-com[25,27-29,42-45]"
-    if colocate_actor_critic:
-        actor_critic_gpus = device_partition[0]
-    else:
-        actor_critic_gpus = device_partition[0] + device_partition[1]
-    if colocate_ref_reward:
-        ref_rew_gpus = device_partition[2]
-    else:
-        ref_rew_gpus = device_partition[2] + device_partition[3]
-    assert ngpus == actor_critic_gpus + ref_rew_gpus + device_partition[4]
-    return ngpus, device_partition, nodelist, colocate_actor_critic, colocate_ref_reward
+
 
 
 if __name__ == "__main__":
@@ -629,6 +653,7 @@ if __name__ == "__main__":
     subparser.add_argument("--seqlen", type=int, default=256)
     subparser.add_argument("--scale_actor", action="store_true")
     subparser.add_argument("--scale_critic", action="store_true")
+    subparser.add_argument("--n_gpus", type=int, default=None)
     subparser.set_defaults(func=main_start)
 
     subparser = subparsers.add_parser("driver", help="launch ray cluster and run workers")
@@ -643,6 +668,7 @@ if __name__ == "__main__":
     subparser.add_argument("--zero_stage", type=int, default=2)
     subparser.add_argument("--scale_actor", action="store_true")
     subparser.add_argument("--scale_critic", action="store_true")
+    subparser.add_argument("--n_gpus", type=int, default=None)
 
     # subparser.add_argument("--ray_port", type=int, required=True)
     subparser.set_defaults(func=main_ray_driver)

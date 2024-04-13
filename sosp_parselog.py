@@ -17,10 +17,13 @@ def _parselog(
     seqlen: int,
     bs: int,
     offload: bool,
+    gpu_scale_factor: int,
 ):
     exp_name = f"or-a{actor_size}c{critic_size}s{seqlen // 100}g{bs//100}"
     if offload:
         exp_name += "-of"
+    if gpu_scale_factor != 1:
+        exp_name += f"x{gpu_scale_factor:1d}"
     logpath = f"/lustre/aigc/llm/logs/fw/{exp_name}/1/rlhf.log"
     oom = False
     worker_max_mem = dict()
@@ -77,19 +80,19 @@ def _parselog(
         avg_time=avg_time,
         # WorkerMaxMem=worker_max_mem,
         # OOMworker=oom_workers,
-        gpu_scale_factor=1,
+        gpu_scale_factor=gpu_scale_factor,
     )
     for k, v in d.items():
         benchmark_db[k].append(v)
     return True
 
 
-def parselog(actor_size: int, critic_size: int):
+def parselog(actor_size: int, critic_size: int, gpu_scale_factor: int):
     zero_stages = [2, 3]
     bszs_seqlens = [(128, 896), (256, 384), (512, 128)]
     offloads = [True, False]
     for (global_bs, seqlen), offload, zero_stage in itertools.product(bszs_seqlens, offloads, zero_stages):
-        _parselog(actor_size, critic_size, zero_stage, seqlen, global_bs, offload)
+        _parselog(actor_size, critic_size, zero_stage, seqlen, global_bs, offload, gpu_scale_factor)
 
 
 if __name__ == "__main__":
@@ -100,15 +103,20 @@ if __name__ == "__main__":
     parser.add_argument(
         "--critic_size", "-c", type=int, default=[7, 13, 34, 70], choices=[7, 13, 34, 70], nargs="+"
     )
+    parser.add_argument("--gpu_scale_factor", "-g", default=[1, 2, 4, 8], nargs="+")
     parser.add_argument("--max", action="store_true")
     parser.add_argument("--dump_to_file", type=str, default=None)
     parser.add_argument("--no_print", action="store_true")
     args = parser.parse_args()
-    for actor_size, critic_size in itertools.product(args.actor_size, args.critic_size):
-        parselog(actor_size, critic_size)
+    for actor_size, critic_size, gpu_scale_factor in itertools.product(
+        args.actor_size, args.critic_size, args.gpu_scale_factor
+    ):
+        parselog(actor_size, critic_size, gpu_scale_factor)
     df = pd.DataFrame(benchmark_db)
     if args.max:
-        df = df.loc[df.groupby(["actor_size", "critic_size", "seqlen"])["Throughput"].idxmax()]
+        df = df.loc[
+            df.groupby(["actor_size", "critic_size", "seqlen", "gpu_scale_factor"])["Throughput"].idxmax()
+        ]
     if not args.no_print:
         print(df.to_string(index=False))
     if args.dump_to_file is not None:
