@@ -56,28 +56,35 @@ def get_nodelist_and_device_partition(
         else:
             colocate_actor_critic = True
             device_partition = (4, 4, 1, 1, 2)
-        nodelist = "QH-com17"
+        nodelist = "QH-com41"
     elif n_gpus == 16:
         if scale_actor and not scale_critic:
             device_partition = (8, 4, 2, 2, 0)
         else:
             colocate_actor_critic = True
             device_partition = (8, 8, 2, 2, 4)
-        nodelist = "QH-com[17-18]"
+        nodelist = "QH-com[42-43]"
     elif n_gpus == 32:
         if scale_actor and not scale_critic:
             device_partition = (16, 4, 4, 2, 6)
         else:
             colocate_actor_critic = True
             device_partition = (16, 16, 4, 8, 4)
-        nodelist = "QH-com[17-20]"
+        nodelist = "QH-com[44-47]"
     elif n_gpus == 64:
         if scale_actor and not scale_critic:
             device_partition = (32, 8, 8, 4, 12)
         else:
             colocate_actor_critic = True
             device_partition = (32, 32, 8, 8, 16)
-        nodelist = "QH-com[15,17-21,24-25]"
+        nodelist = "QH-com[20-22,24-28]"
+    elif n_gpus == 128:
+        if scale_actor and not scale_critic:
+            device_partition = (64, 8, 16, 8, 32)
+        else:
+            colocate_actor_critic = True
+            device_partition = (64, 64, 16, 8, 40)
+        nodelist = "QH-com[20-22,24-28,41-48]"
     if colocate_actor_critic:
         actor_critic_gpus = device_partition[0]
     else:
