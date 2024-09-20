@@ -114,15 +114,10 @@ def get_llm_for_sequence_regression(
     else:
         nf4_config = None
 
-    model = cls_class.from_pretrained(
-        model_name_or_path,
-        config=config,
-        trust_remote_code=True,
-        torch_dtype=torch.bfloat16 if bf16 else "auto",
-        quantization_config=nf4_config,
-        device_map=device_map,
-        **kwargs,
-    )
+    with torch.device("cuda"):
+        model = cls_class(
+            config=config
+        )
 
     # LoRA
     if lora_rank > 0:

@@ -5,8 +5,10 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
+import os
 from peft import LoraConfig, TaskType, get_peft_model
 from peft.tuners.lora import LoraLayer
+import transformers
 import time
 from transformers import AutoModelForCausalLM, BitsAndBytesConfig, PreTrainedModel
 from transformers.deepspeed import HfDeepSpeedConfig
@@ -64,14 +66,14 @@ class Actor(nn.Module):
             else:
                 nf4_config = None
 
-            self.model = AutoModelForCausalLM.from_pretrained(
-                pretrain_or_model,
-                trust_remote_code=True,
-                attn_implementation=attn_implementation,
-                quantization_config=nf4_config,
-                torch_dtype=torch.bfloat16 if bf16 else "auto",
-                device_map=device_map,
-            )
+            assert os.path.exists(pretrain_or_model)
+            config = transformers.AutoConfig.from_pretrained(pretrain_or_model, trust_remote_code=True)
+            with torch.device("cuda"):
+                self.model = AutoModelForCausalLM.from_config(
+                    config,
+                    attn_implementation=attn_implementation,
+                    torch_dtype=torch.bfloat16 if bf16 else torch.float16,
+                )
 
             # LoRA
             if lora_rank > 0:

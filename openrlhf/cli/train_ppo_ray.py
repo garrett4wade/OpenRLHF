@@ -40,6 +40,7 @@ def _validate_args(args):
 
 
 def train(args):
+    ray.init()
     _validate_args(args)
 
     # configure strategy
@@ -69,6 +70,7 @@ def train(args):
     #   |actor| ref  |actor| ref  |actor| ref  |actor|ref  |
     #   |GPU0 | GPU0 |GPU1 | GPU1 |GPU2 | GPU2 |GPU3 | GPU3 |
     actor_model = PPORayActorGroup(
+        "actor",
         args.actor_num_nodes,
         args.actor_num_gpus_per_node,
         ActorModelRayActor,
@@ -77,6 +79,7 @@ def train(args):
     )
 
     ref_model = PPORayActorGroup(
+        "ref",
         args.ref_num_nodes,
         args.ref_num_gpus_per_node,
         ReferenceModelRayActor,
@@ -100,6 +103,7 @@ def train(args):
         ray.get(pg.ready())
 
     critic_model = PPORayActorGroup(
+        "critic",
         args.critic_num_nodes,
         args.critic_num_gpus_per_node,
         CriticModelRayActor,
@@ -111,9 +115,10 @@ def train(args):
     if not args.remote_rm_url:
         reward_pretrains = args.reward_pretrain.split(",")
         reward_models = []
-        for _ in reward_pretrains:
+        for i, _ in enumerate(reward_pretrains):
             reward_models.append(
                 PPORayActorGroup(
+                    f"reward{i}",
                     args.reward_num_nodes,
                     args.reward_num_gpus_per_node,
                     RewardModelRayActor,
@@ -156,12 +161,6 @@ def train(args):
         critic_model, ref_model, reward_models, args.remote_rm_url, reward_fn=reward_fn, vllm_engines=vllm_engines
     )
     ray.get(refs)
-
-    # save model
-    ray.get(actor_model.async_save_model())
-
-    if args.save_value_network:
-        ray.get(critic_model.async_save_model())
 
 
 if __name__ == "__main__":
@@ -254,6 +253,7 @@ if __name__ == "__main__":
     parser.add_argument("--lambd", type=float, default=0.95, help="PPO GAE lambd")
     parser.add_argument("--gamma", type=float, default=1, help="PPO GAE gamma")
     parser.add_argument("--micro_train_batch_size", type=int, default=4, help="batch size per GPU")
+    parser.add_argument("--critic_micro_train_batch_size", type=int, default=None)
     parser.add_argument("--train_batch_size", type=int, default=128, help="Global training batch size")
     parser.add_argument("--normalize_reward", action="store_true", default=False, help="Enable Reward Normazation")
     parser.add_argument("--top_p", type=float, default=1.0)
@@ -279,7 +279,7 @@ if __name__ == "__main__":
     parser.add_argument("--ref_reward_offload", action="store_true", default=False)
 
     # Custom dataset
-    parser.add_argument("--prompt_data", type=str, default=None, help="HF dataset name or path")
+    parser.add_argument("--prompt_data", type=str, default=".data/ppo_prompt.jsonl", help="HF dataset name or path")
     parser.add_argument(
         "--prompt_data_probs",
         type=str,
@@ -296,7 +296,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--pretrain_split", type=str, default="train")
 
-    parser.add_argument("--input_key", type=str, default="input", help="JSON dataset key")
+    parser.add_argument("--input_key", type=str, default="prompt", help="JSON dataset key")
     parser.add_argument("--input_template", type=str, default=None)
     parser.add_argument(
         "--apply_chat_template", action="store_true", default=False, help="Use HF tokenizer chat template"

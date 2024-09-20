@@ -17,7 +17,14 @@ RUN apt-get -y install build-essential git python3-dev python3-pip libopenexr-de
 RUN pip uninstall xgboost transformer_engine flash_attn -y
 RUN pip install vllm==0.4.2
 
-COPY docker-entrypoint.sh .
+COPY ./dockerfile/docker-entrypoint.sh .
 RUN chmod a+x docker-entrypoint.sh
 
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
+
+ENV MAX_JOBS=8
+COPY ./requirements.txt /
+RUN pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r /requirements.txt && rm /requirements.txt
+
+COPY ./wheels/flash_attn-2.6.1+cu123torch2.3cxx11abiFALSE-cp310-cp310-linux_x86_64.whl /
+RUN pip install /flash_attn-2.6.1+cu123torch2.3cxx11abiFALSE-cp310-cp310-linux_x86_64.whl && rm /flash_attn-2.6.1+cu123torch2.3cxx11abiFALSE-cp310-cp310-linux_x86_64.whl

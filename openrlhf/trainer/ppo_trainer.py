@@ -309,7 +309,6 @@ class PPOTrainer(ABC):
         args,
         prompts_dataloader,
         pretrain_dataloader,
-        args,
         consumed_samples=0,
         num_update_steps_per_episodes=1,
         hf_actor_config=None,

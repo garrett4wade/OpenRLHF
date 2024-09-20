@@ -120,6 +120,7 @@ def create_vllm_engines(
         scheduling_strategy = None
 
         if tensor_parallel_size > 1:
+            num_gpus = 0.1
             bundles = [{"GPU": 1, "CPU": 1}] * tensor_parallel_size
             pg = placement_group(bundles)
             ray.get(pg.ready())
