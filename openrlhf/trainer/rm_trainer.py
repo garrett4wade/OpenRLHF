@@ -5,10 +5,10 @@ import loralib as lora
 import torch
 from torch import nn
 from torch.optim import Optimizer
-from torch.utils.data import DistributedSampler
 from tqdm import tqdm
 
-from openrlhf.models import LogExpLoss, PairWiseLoss, SwitchBalancingLoss
+from openrlhf.models import LogExpLoss, PairWiseLoss
+from openrlhf.utils.distributed_sampler import DistributedSampler
 
 
 class RewardModelTrainer(ABC):
@@ -61,6 +61,9 @@ class RewardModelTrainer(ABC):
         # Mixtral 8*7b
         self.aux_loss = self.args.aux_loss_coef > 1e-8
 
+        # packing samples
+        self.packing_samples = strategy.args.packing_samples
+
         self.margin_loss = self.strategy.args.margin_loss
         self.compute_fp32_loss = self.strategy.args.compute_fp32_loss
 
@@ -69,7 +72,8 @@ class RewardModelTrainer(ABC):
             import wandb
 
             self._wandb = wandb
-            wandb.login(key=strategy.args.use_wandb)
+            if not wandb.api.api_key:
+                wandb.login(key=strategy.args.use_wandb)
             wandb.init(
                 entity=strategy.args.wandb_org,
                 project=strategy.args.wandb_project,
@@ -84,16 +88,25 @@ class RewardModelTrainer(ABC):
             wandb.define_metric("eval/global_step")
             wandb.define_metric("eval/*", step_metric="eval/global_step", step_sync=True)
 
-    def fit(self, args):
+    def fit(self, args, consumed_samples=0, num_update_steps_per_epoch=None):
         # get eval and save steps
         if args.eval_steps == -1:
-            args.eval_steps = self.train_dataloader.__len__()  # Evaluate once per epoch
+            args.eval_steps = num_update_steps_per_epoch  # Evaluate once per epoch
         if args.save_steps == -1:
             args.save_steps = float("inf")  # do not save ckpt
 
-        global_step = 1
-        epoch_bar = tqdm(range(self.epochs), desc="Train epoch", disable=not self.strategy.is_rank_0())
-        for epoch in range(self.epochs):
+        # Restore step and start_epoch
+        step = consumed_samples // args.train_batch_size * self.strategy.accumulated_gradient + 1
+        start_epoch = consumed_samples // args.train_batch_size // num_update_steps_per_epoch
+        consumed_samples = consumed_samples % (num_update_steps_per_epoch * args.train_batch_size)
+
+        epoch_bar = tqdm(range(start_epoch, self.epochs), desc="Train epoch", disable=not self.strategy.is_rank_0())
+        for epoch in range(start_epoch, self.epochs):
+            if isinstance(self.train_dataloader.sampler, DistributedSampler):
+                self.train_dataloader.sampler.set_epoch(
+                    epoch, consumed_samples=0 if epoch > start_epoch else consumed_samples
+                )
+
             #  train
             step_bar = tqdm(
                 range(self.train_dataloader.__len__()),
@@ -101,26 +114,34 @@ class RewardModelTrainer(ABC):
                 disable=not self.strategy.is_rank_0(),
             )
 
-            if isinstance(self.train_dataloader.sampler, DistributedSampler):
-                self.train_dataloader.sampler.set_epoch(epoch)
-
             self.model.train()
             acc_mean = 0
             loss_mean = 0
-            for chosen_ids, c_mask, reject_ids, r_mask, margin in self.train_dataloader:
-                chosen_ids = chosen_ids.squeeze(1).to(torch.cuda.current_device())
-                c_mask = c_mask.squeeze(1).to(torch.cuda.current_device())
-                reject_ids = reject_ids.squeeze(1).to(torch.cuda.current_device())
-                r_mask = r_mask.squeeze(1).to(torch.cuda.current_device())
+            for data in self.train_dataloader:
+                if not self.packing_samples:
+                    chosen_ids, c_mask, reject_ids, r_mask, margin = data
+                    chosen_ids = chosen_ids.squeeze(1).to(torch.cuda.current_device())
+                    c_mask = c_mask.squeeze(1).to(torch.cuda.current_device())
+                    reject_ids = reject_ids.squeeze(1).to(torch.cuda.current_device())
+                    r_mask = r_mask.squeeze(1).to(torch.cuda.current_device())
+
+                    chosen_reward, reject_reward, aux_loss = self.concatenated_forward(
+                        self.model, chosen_ids, c_mask, reject_ids, r_mask
+                    )
+                else:
+                    packed_input_ids, packed_attention_masks, packed_seq_lens, margin = data
+                    packed_input_ids, packed_attention_masks = packed_input_ids.to(
+                        torch.cuda.current_device()
+                    ), packed_attention_masks.to(torch.cuda.current_device())
+
+                    chosen_reward, reject_reward, aux_loss = self.packed_samples_forward(
+                        self.model, packed_input_ids, packed_attention_masks, packed_seq_lens
+                    )
 
                 if self.margin_loss:
-                    margin = margin.to(torch.cuda.current_device())
+                    margin = torch.tensor(margin).to(torch.cuda.current_device())
                 else:
                     margin = None
-
-                chosen_reward, reject_reward, aux_loss = self.concatenated_forward(
-                    self.model, chosen_ids, c_mask, reject_ids, r_mask
-                )
 
                 # loss function
                 if self.compute_fp32_loss:
@@ -136,41 +157,44 @@ class RewardModelTrainer(ABC):
                 self.strategy.backward(loss, self.model, self.optimizer)
                 self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler)
 
-                acc_mean = acc_mean * 0.9 + 0.1 * (chosen_reward > reject_reward).float().mean().item()
+                acc = (chosen_reward > reject_reward).float().mean().item()
+                acc_mean = acc_mean * 0.9 + 0.1 * acc
                 loss_mean = loss_mean * 0.9 + 0.1 * preference_loss.item()
                 # optional rm info
                 logs_dict = {
-                    "preference_loss": preference_loss.item(),
+                    "loss": preference_loss.item(),
+                    "acc": acc,
                     "chosen_reward": chosen_reward.mean().item(),
                     "reject_reward": reject_reward.mean().item(),
-                    "acc_mean": acc_mean,
                     "loss_mean": loss_mean,
+                    "acc_mean": acc_mean,
+                    "lr": self.scheduler.get_last_lr()[0],
                 }
                 if self.aux_loss:
                     logs_dict["aux_loss"] = aux_loss.item()
-                # logs/checkpoints/evaluate
-                self.save_logs_and_checkpoints(args, global_step, step_bar, logs_dict)
 
+                # step bar
+                logs_dict = self.strategy.all_reduce(logs_dict)
+                step_bar.set_postfix(logs_dict)
                 step_bar.update()
-                global_step += 1
+
+                # logs/checkpoints/evaluation
+                if step % self.strategy.accumulated_gradient == 0:
+                    global_step = step // self.strategy.accumulated_gradient
+                    client_states = {"consumed_samples": global_step * args.train_batch_size}
+                    self.save_logs_and_checkpoints(args, global_step, step_bar, logs_dict, client_states)
+
+                step += 1
             epoch_bar.update()
 
         if self._wandb is not None and self.strategy.is_rank_0():
             self._wandb.finish()
 
     # logs/checkpoints/evaluate
-    def save_logs_and_checkpoints(self, args, global_step, step_bar, logs_dict={}):
+    def save_logs_and_checkpoints(self, args, global_step, step_bar, logs_dict={}, client_states={}):
         if global_step % args.logging_steps == 0:
-            # step bar
-            logs_dict = self.strategy.all_reduce(logs_dict)
-            step_bar.set_postfix(logs_dict)
-
             # wandb
-            if (
-                self._wandb is not None
-                and self.strategy.is_rank_0()
-                and global_step % self.strategy.accumulated_gradient == 0
-            ):
+            if self._wandb is not None and self.strategy.is_rank_0():
                 logs = {"train/%s" % k: v for k, v in {**logs_dict, "global_step": global_step}.items()}
                 self._wandb.log(logs)
 
@@ -181,7 +205,9 @@ class RewardModelTrainer(ABC):
         # TODO: save best model on dev, use loss/perplexity on whole dev dataset as metric
         if global_step % args.save_steps == 0:
             tag = f"global_step{global_step}"
-            self.strategy.save_ckpt(self.model, args.ckpt_path, tag, args.max_ckpt_num, args.max_ckpt_mem)
+            self.strategy.save_ckpt(
+                self.model, args.ckpt_path, tag, args.max_ckpt_num, args.max_ckpt_mem, client_states
+            )
 
     def evaluate(self, eval_dataloader, steps=0):
         step_bar = tqdm(
@@ -194,16 +220,32 @@ class RewardModelTrainer(ABC):
             acc = 0
             rewards = []
             loss_sum = 0
-            for chosen_ids, c_mask, reject_ids, r_mask, margin in eval_dataloader:
-                chosen_ids = chosen_ids.squeeze(1).to(torch.cuda.current_device())
-                c_mask = c_mask.squeeze(1).to(torch.cuda.current_device())
-                reject_ids = reject_ids.squeeze(1).to(torch.cuda.current_device())
-                r_mask = r_mask.squeeze(1).to(torch.cuda.current_device())
-                margin = margin.to(torch.cuda.current_device())
+            for data in eval_dataloader:
+                if not self.packing_samples:
+                    chosen_ids, c_mask, reject_ids, r_mask, margin = data
+                    chosen_ids = chosen_ids.squeeze(1).to(torch.cuda.current_device())
+                    c_mask = c_mask.squeeze(1).to(torch.cuda.current_device())
+                    reject_ids = reject_ids.squeeze(1).to(torch.cuda.current_device())
+                    r_mask = r_mask.squeeze(1).to(torch.cuda.current_device())
 
-                chosen_reward, reject_reward, _ = self.concatenated_forward(
-                    self.model, chosen_ids, c_mask, reject_ids, r_mask
-                )
+                    chosen_reward, reject_reward, _ = self.concatenated_forward(
+                        self.model, chosen_ids, c_mask, reject_ids, r_mask
+                    )
+                else:
+                    packed_input_ids, packed_attention_masks, packed_seq_lens, margin = data
+                    packed_input_ids, packed_attention_masks = packed_input_ids.to(
+                        torch.cuda.current_device()
+                    ), packed_attention_masks.to(torch.cuda.current_device())
+
+                    chosen_reward, reject_reward, _ = self.packed_samples_forward(
+                        self.model, packed_input_ids, packed_attention_masks, packed_seq_lens
+                    )
+
+                if self.margin_loss:
+                    margin = torch.tensor(margin).to(torch.cuda.current_device())
+                else:
+                    margin = None
+
                 loss = self.loss_fn(chosen_reward, reject_reward, margin)
 
                 rewards += [chosen_reward.flatten(), reject_reward.flatten()]
@@ -287,3 +329,19 @@ class RewardModelTrainer(ABC):
         max_length = max(c_mask.shape[1], r_mask.shape[1])
         att_masks = torch.cat((pad_to_length(c_mask, max_length, 0), pad_to_length(r_mask, max_length, 0)), dim=0)
         return inputs_ids, att_masks
+
+    def packed_samples_forward(self, model, packed_input_ids, packed_attention_masks, packed_seq_lens):
+        all_values, output = model(packed_input_ids, attention_mask=packed_attention_masks, return_output=True)
+        half_len = len(packed_seq_lens) // 2
+        rewards = []
+        index = 0
+        for i, seq_len in enumerate(packed_seq_lens):
+            index = index + seq_len
+            rewards.append(all_values[0, index - 1])
+        rewards = torch.stack(rewards)
+
+        chosen_rewards = rewards[:half_len]
+        rejected_rewards = rewards[half_len:]
+        aux_loss = output.aux_loss if "aux_loss" in output else []
+
+        return chosen_rewards, rejected_rewards, aux_loss

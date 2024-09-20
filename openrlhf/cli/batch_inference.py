@@ -7,7 +7,6 @@ import torch
 from torch import distributed as dist
 from tqdm import tqdm
 from transformers import AutoTokenizer
-from vllm import LLM, SamplingParams
 
 from openrlhf.datasets import PromptDataset, SFTDataset
 from openrlhf.models import Actor, get_llm_for_sequence_regression
@@ -15,6 +14,8 @@ from openrlhf.utils import blending_datasets, get_processor, get_strategy, get_t
 
 
 def batch_generate_vllm(args):
+    from vllm import LLM, SamplingParams
+
     # configure strategy
     class Empty:
         pass
@@ -22,12 +23,20 @@ def batch_generate_vllm(args):
     dummy_strategy = Empty()
     dummy_strategy.print = print
     dummy_strategy.is_rank_0 = lambda: True
+    dummy_strategy.args = args
 
     # configure tokenizer
     tokenizer = AutoTokenizer.from_pretrained(args.pretrain, trust_remote_code=True)
 
     # configure model
-    llm = LLM(model=args.pretrain, tensor_parallel_size=args.tp_size, trust_remote_code=True, seed=args.seed)
+    llm = LLM(
+        model=args.pretrain,
+        tensor_parallel_size=args.tp_size,
+        trust_remote_code=True,
+        seed=args.seed,
+        max_num_seqs=args.max_num_seqs,
+        enable_prefix_caching=args.enable_prefix_caching,
+    )
 
     # Create a sampling params object.
     sampling_params = SamplingParams(
@@ -36,6 +45,9 @@ def batch_generate_vllm(args):
         use_beam_search=False,
         temperature=args.temperature,
         repetition_penalty=args.repetition_penalty,
+        skip_special_tokens=False,
+        truncate_prompt_tokens=args.prompt_max_len,
+        include_stop_str_in_output=True,
     )
 
     prompts_data = blending_datasets(
@@ -45,6 +57,7 @@ def batch_generate_vllm(args):
         args.seed,
         return_eval=False,
         max_count=args.max_samples,
+        train_split=args.dataset_split,
     )
     if args.iter is None:
         prompts_data = prompts_data.select(range(min(args.max_samples, len(prompts_data))))
@@ -58,20 +71,19 @@ def batch_generate_vllm(args):
     prompts = list(prompts_dataset)
 
     # Conditional SFT inference
-    if args.enable_ca:
+    if args.enable_csft:
         for i in range(len(prompts)):
-            prompts[i] += args.ca_prompt.strip() + " "
+            prompts[i] += args.csft_prompt.strip() + " "
 
     # best of n
     N = args.best_of_n
     output_dataset = []
 
-    for _ in range(N):
-        outputs = llm.generate(prompts, sampling_params)
-        for output in outputs:
-            prompt = output.prompt
-            output = output.outputs[0].text
-            output_dataset.append({"input": prompt, "output": output})
+    outputs = llm.generate(prompts * N, sampling_params)
+    for output in outputs:
+        prompt = output.prompt
+        output = output.outputs[0].text
+        output_dataset.append({"input": prompt, "output": output})
 
     with jsonlines.open(args.output_path, mode="w") as writer:
         writer.write_all(output_dataset)
@@ -87,13 +99,10 @@ def batch_generate(args):
         args.pretrain,
         use_flash_attention_2=args.flash_attn,
         bf16=args.bf16,
-        load_in_4bit=args.load_in_4bit,
     )
-    if args.to_bettertransformer:
-        model.to_bettertransformer()
 
     # configure tokenizer
-    tokenizer = get_tokenizer(args.pretrain, model.model, "left", strategy)
+    tokenizer = get_tokenizer(args.pretrain, model.model, "left", strategy, use_fast=not args.disable_fast_tokenizer)
 
     # prepare models
     model = strategy.prepare(model)
@@ -104,6 +113,7 @@ def batch_generate(args):
         batch = tokenizer(
             texts,
             return_tensors="pt",
+            add_special_tokens=False,
             max_length=args.prompt_max_len,
             padding=True,
             truncation=True,
@@ -117,6 +127,7 @@ def batch_generate(args):
         args.seed,
         return_eval=False,
         max_count=args.max_samples,
+        train_split=args.dataset_split,
     )
     if args.iter is None:
         prompts_data = prompts_data.select(range(min(args.max_samples, len(prompts_data))))
@@ -132,6 +143,7 @@ def batch_generate(args):
     )
     pbar = tqdm(
         prompts_dataloader,
+        desc="Generating",
         disable=not strategy.is_rank_0(),
     )
 
@@ -141,16 +153,16 @@ def batch_generate(args):
 
     for prompts in pbar:
         # Conditional SFT inference
-        if args.enable_ca:
+        if args.enable_csft:
             for i in range(len(prompts)):
-                prompts[i] += args.ca_prompt.strip() + " "
+                prompts[i] += args.csft_prompt.strip() + " "
 
         inputs = tokenize_fn(prompts)
         for _ in range(N):
             outputs = model.model.generate(
                 **inputs,
                 use_cache=True,
-                max_length=args.max_len,
+                max_new_tokens=args.max_new_tokens,
                 do_sample=not args.greedy_sampling,
                 top_p=args.top_p,
                 early_stopping=True,
@@ -201,11 +213,11 @@ def batch_rm_inference(args):
         normalize_reward=True,
         use_flash_attention_2=args.flash_attn,
         bf16=args.bf16,
-        load_in_4bit=args.load_in_4bit,
+        value_head_prefix=args.value_head_prefix,
     )
 
     # configure tokenizer
-    tokenizer = get_tokenizer(args.pretrain, model, "left", strategy)
+    tokenizer = get_tokenizer(args.pretrain, model, "left", strategy, use_fast=not args.disable_fast_tokenizer)
 
     # prepare models
     model = strategy.prepare(model)
@@ -218,6 +230,7 @@ def batch_rm_inference(args):
         args.seed,
         return_eval=False,
         max_count=args.max_samples,
+        train_split=args.dataset_split,
     )
     dataset = dataset.select(range(min(args.max_samples, len(dataset))))
     dataset = SFTDataset(
@@ -228,6 +241,7 @@ def batch_rm_inference(args):
     )
     pbar = tqdm(
         dataloader,
+        desc="Rewarding",
         disable=not strategy.is_rank_0(),
     )
 
@@ -244,6 +258,7 @@ def batch_rm_inference(args):
 
             dist.barrier()
 
+    os.makedirs(os.path.dirname(args.output_path), exist_ok=True)
     with jsonlines.open(args.output_path + str(strategy.get_rank()), mode="w") as writer:
         writer.write_all(output_dataset)
 
@@ -275,51 +290,70 @@ def batch_rm_inference(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--eval_task", type=str, default=None, help="set to generate, generate_vllm or rm")
-    parser.add_argument("--pretrain", type=str, default=None)
-    parser.add_argument("--max_len", type=int, default=2048)
-    parser.add_argument("--zero_stage", type=int, default=0)
-    parser.add_argument("--local_rank", type=int, default=-1, help="local_rank for deepspeed")
-    parser.add_argument("--bf16", action="store_true", default=False)
-    parser.add_argument("--flash_attn", action="store_true", default=False)
+    parser.add_argument(
+        "--eval_task", type=str, default=None, help="Set to generate_vllm, generate (HF generate) or rm"
+    )
+    parser.add_argument("--zero_stage", type=int, default=0, help="DeepSpeed ZeRO Stage")
+    parser.add_argument("--local_rank", type=int, default=-1, help="local_rank for deepspeed cli")
+    parser.add_argument("--bf16", action="store_true", default=False, help="Enable bfloat16 for deepspeed")
+    parser.add_argument("--flash_attn", action="store_true", default=False, help="Enable FlashAtten2")
+    parser.add_argument("--disable_fast_tokenizer", action="store_true", default=False)
     parser.add_argument("--micro_batch_size", type=int, default=16)
-    parser.add_argument("--dataset", type=str, default=None)
-    parser.add_argument("--dataset_probs", type=str, default="1.0")
-    parser.add_argument("--output_path", type=str, default=None)
-    parser.add_argument("--max_samples", type=int, default=1000000)
     parser.add_argument("--seed", type=int, default=1234)
 
-    # for generation
-    parser.add_argument("--ta_prompt", type=str, default=None)
-    parser.add_argument("--prompt_max_len", type=int, default=1024)
-    parser.add_argument("--greedy_sampling", action="store_true", default=False)
-    parser.add_argument("--to_bettertransformer", action="store_true", default=False)
-    parser.add_argument("--top_p", type=float, default=0.9)
-    parser.add_argument("--temperature", type=float, default=1.0)
-    parser.add_argument("--repetition_penalty", type=float, default=1.2)
-    parser.add_argument("--best_of_n", type=int, default=1)
-    parser.add_argument("--input_template", type=str, default="Human: {}\nAssistant: ")
-    parser.add_argument("--max_new_tokens", type=int, default=1024)
-    parser.add_argument("--tp_size", type=int, default=8)
+    # Models
+    parser.add_argument("--pretrain", type=str, default=None, help="HF pretrain model name or path")
+    parser.add_argument(
+        "--value_head_prefix", type=str, default="value_head", help="value_head prefix for Reward Model"
+    )
+
+    # Custom dataset
+    parser.add_argument("--dataset", type=str, default=None)
+    parser.add_argument("--dataset_probs", type=str, default="1.0")
+    parser.add_argument("--dataset_split", type=str, default="train")
+    parser.add_argument("--input_key", type=str, default="input", help="JSON dataset key")
+    parser.add_argument("--output_key", type=str, default="output", help="JSON dataset key")
+    parser.add_argument(
+        "--apply_chat_template", action="store_true", default=False, help="HF tokenizer apply_chat_template"
+    )
+    parser.add_argument("--input_template", type=str, default=None)
+    parser.add_argument("--max_len", type=int, default=2048, help="Max tokens for the samples")
+    parser.add_argument("--max_samples", type=int, default=1e8, help="Max number of samples")
+    parser.add_argument("--output_path", type=str, default=None, help="Output JSON data path")
+
+    # For generation
+    parser.add_argument("--prompt_max_len", type=int, default=1024, help="Max tokens for prompt")
+    parser.add_argument("--max_new_tokens", type=int, default=1024, help="Max new tokens in generation")
+    parser.add_argument("--greedy_sampling", action="store_true", default=False, help="Use Greedy sampling")
+    parser.add_argument("--top_p", type=float, default=1.0, help="top_p for Sampling")
+    parser.add_argument("--temperature", type=float, default=1.0, help="temperature for Sampling")
+    parser.add_argument("--repetition_penalty", type=float, default=1.0)
+    parser.add_argument("--best_of_n", type=int, default=1, help="Number of responses to generate per prompt")
     parser.add_argument(
         "--post_processor",
         type=str,
         default=None,
-        help="set to rs (Rejection Sampling), ca (Conditional SFT) or None",
+        help="set to rs (Rejection Sampling), csft (Conditional SFT), iter_dpo (Iterative DPO) or None",
     )
+    # For vllm
+    parser.add_argument("--tp_size", type=int, default=torch.cuda.device_count())
+    parser.add_argument("--max_num_seqs", type=int, default=256)
+    parser.add_argument("--enable_prefix_caching", action="store_true", default=False)
 
-    # QLora
-    parser.add_argument("--load_in_4bit", action="store_true", default=False)
+    # For Iterative generation and Rejection Sampling
+    parser.add_argument(
+        "--iter",
+        type=int,
+        default=None,
+        help="Used to slice the datasets in range iter * rollout_batch_size: (iter + 1) * rollout_batch_size",
+    )
+    parser.add_argument("--rollout_batch_size", type=int, default=2048, help="Number of samples to generate")
 
-    # for Iterative generation and Rejection Sampling
-    parser.add_argument("--iter", type=int, default=None)
-    parser.add_argument("--rollout_batch_size", type=int, default=2048)
-
-    # for Conditional SFT
-    parser.add_argument("--normalize_reward", action="store_true", default=False)
+    # For Conditional SFT
+    parser.add_argument("--normalize_reward", action="store_true", default=False, help="Enable Reward Normazation")
     parser.add_argument("--reward_template", type=str, default=None)
-    parser.add_argument("--enable_ca", action="store_true", default=False)
-    parser.add_argument("--ca_prompt", type=str, default="<rm_score>: 5.00", help="Conditional SFT prompt")
+    parser.add_argument("--enable_csft", action="store_true", default=False)
+    parser.add_argument("--csft_prompt", type=str, default="<rm_score>: 5.00", help="Conditional SFT prompt")
 
     args = parser.parse_args()
     if args.eval_task and args.eval_task == "generate":

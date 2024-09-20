@@ -1,4 +1,5 @@
 import math
+import os
 from typing import Dict, Optional
 
 import copy
@@ -66,6 +67,8 @@ class CriticModelRayActor(BasePPORole):
         strategy = copy.deepcopy(strategy)
         assert strategy.args.critic_micro_train_batch_size is not None
         strategy.micro_train_batch_size = strategy.args.critic_micro_train_batch_size
+        args = strategy.args
+
         self._setup_distributed(strategy)
         critic = get_llm_for_sequence_regression(
             pretrain,
@@ -77,7 +80,10 @@ class CriticModelRayActor(BasePPORole):
             lora_rank=strategy.args.lora_rank,
             lora_alpha=strategy.args.lora_alpha,
             target_modules=strategy.args.target_modules,
+            lora_dropout=strategy.args.lora_dropout,
             ds_config=strategy.get_ds_train_config(is_actor=False),
+            value_head_prefix=strategy.args.value_head_prefix,
+            init_value_head=strategy.args.pretrain == strategy.args.critic_pretrain,
         )
         self.critic_hf_config = critic.config
         def _count_params(model):
@@ -90,19 +96,24 @@ class CriticModelRayActor(BasePPORole):
         strategy.print("reward normalization status: {}".format(strategy.args.normalize_reward))
         strategy.print("mean: {}, std {}".format(critic.mean, critic.std))
 
-        args = strategy.args
+        # configure tokenizer
+        if strategy.args.save_value_network:
+            self.tokenizer = get_tokenizer(
+                pretrain, critic, "left", strategy, use_fast=not strategy.args.disable_fast_tokenizer
+            )
 
         # configure optimizer
         critic_optim = strategy.create_optimizer(
-            critic, lr=args.critic_learning_rate, betas=(0.9, 0.95), weight_decay=args.l2
+            critic, lr=args.critic_learning_rate, betas=args.adam_betas, weight_decay=args.l2
         )
 
         # configure scheduler
         critic_scheduler = get_scheduler(
-            "cosine",
+            "cosine_with_min_lr",
             critic_optim,
             num_warmup_steps=math.ceil(max_steps * 0.03),
             num_training_steps=max_steps,
+            scheduler_specific_kwargs={"min_lr": args.critic_learning_rate * 0.1},
         )
 
         if args.gradient_checkpointing:
@@ -115,6 +126,12 @@ class CriticModelRayActor(BasePPORole):
             (critic, critic_optim, critic_scheduler),
             is_rlhf=True,
         )
+
+        # load checkpoint
+        if args.load_checkpoint and os.path.exists(os.path.join(args.ckpt_path, "_actor")):
+            ckpt_path = os.path.join(args.ckpt_path, "_critic")
+            strategy.load_ckpt(self.critic, ckpt_path)
+            strategy.print(f"Loaded the checkpoint: {ckpt_path}")
 
         # configure Trainer
         # only use wandb at actor model
@@ -180,3 +197,22 @@ class CriticModelRayActor(BasePPORole):
         self.trainer.replay_buffer.clear()
         torch.cuda.empty_cache()
         return status
+
+    def empty_cache(self) -> None:
+        torch.cuda.empty_cache()
+
+    def save_model(self):
+        args = self.strategy.args
+
+        # save model checkpoint after fitting on only rank0
+        self.strategy.save_model(
+            self.critic,
+            self.tokenizer,
+            args.save_path + "_critic",
+        )
+
+    def save_checkpoint(self, tag):
+        args = self.strategy.args
+        self.strategy.save_ckpt(
+            self.critic, os.path.join(args.ckpt_path, "_critic"), tag, args.max_ckpt_num, args.max_ckpt_mem
+        )

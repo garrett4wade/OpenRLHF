@@ -2,20 +2,18 @@ from typing import Optional, Tuple, Union
 
 import deepspeed
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
-from optimum.bettertransformer import BetterTransformer
-from peft import LoraConfig, TaskType, get_peft_config, get_peft_model
+from peft import LoraConfig, TaskType, get_peft_model
 from peft.tuners.lora import LoraLayer
 import time
 from transformers import AutoModelForCausalLM, BitsAndBytesConfig, PreTrainedModel
 from transformers.deepspeed import HfDeepSpeedConfig
-from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
 
-from .utils import find_all_linear_names, log_probs_from_logits, replace_rope_embedding
-
-# https://github.com/microsoft/DeepSpeed/issues/4932
-replace_rope_embedding()
+from .packing_utils import patch_for_block_diag_attn
+from .ring_attn_utils import reset_ring_attn_position_ids, update_ring_attn_params
+from .utils import log_probs_from_logits, reset_position_ids
 
 
 class Actor(nn.Module):
@@ -36,23 +34,20 @@ class Actor(nn.Module):
         load_in_4bit=False,
         lora_rank=0,
         lora_alpha=16,
+        lora_dropout=0,
         target_modules=None,
         ds_config=None,
+        device_map=None,
+        packing_samples=False,
+        **kwargs,
     ) -> None:
         super().__init__()
 
         if isinstance(pretrain_or_model, str):
             attn_implementation = "flash_attention_2" if use_flash_attention_2 else "eager"
 
-            # Patch for https://github.com/huggingface/transformers/issues/28052
-            def _autoset_attn_implementation_monkeypatch(cls, config, *args, **kwargs):  # type: ignore
-                config._attn_implementation = attn_implementation
-                return config
-
-            PreTrainedModel._autoset_attn_implementation = classmethod(_autoset_attn_implementation_monkeypatch)
-
             # Note: dschf is defined in function scope to avoid global effects
-            # https://huggingface.co/docs/transformers/main_classes/deepspeed#nontrainer-deepspeed-integration
+            # https://huggingface.co/docs/transformers/deepspeed#non-trainer-deepspeed-integration
             if ds_config is not None and ds_config["zero_optimization"]["stage"] == 3:
                 dschf = HfDeepSpeedConfig(ds_config)
             else:
@@ -74,7 +69,8 @@ class Actor(nn.Module):
                 trust_remote_code=True,
                 attn_implementation=attn_implementation,
                 quantization_config=nf4_config,
-                torch_dtype="auto",
+                torch_dtype=torch.bfloat16 if bf16 else "auto",
+                device_map=device_map,
             )
 
             # LoRA
@@ -85,8 +81,8 @@ class Actor(nn.Module):
                     task_type=TaskType.CAUSAL_LM,
                     r=lora_rank,
                     lora_alpha=lora_alpha,
-                    target_modules=target_modules or find_all_linear_names(self.model, load_in_4bit),
-                    lora_dropout=0,
+                    target_modules=target_modules,
+                    lora_dropout=lora_dropout,
                     bias="none",
                 )
                 self.model = get_peft_model(self.model, lora_config)
@@ -101,18 +97,27 @@ class Actor(nn.Module):
                             if hasattr(module, "weight"):
                                 module = module.to(torch.bfloat16)
 
-            # Mixtral 8x7b - balancing loss
-            if "output_router_logits" in self.model.config.to_dict():
-                print("[Mixtral 8x7b] set output_router_logits as True")
+            # MoE - balancing loss
+            model_config = self.model.config.to_dict()
+            if "output_router_logits" in model_config:
+                print("[MoE] set output_router_logits as True")
                 self.model.config.output_router_logits = True
-                deepspeed.utils.set_z3_leaf_modules(self.model, [MixtralSparseMoeBlock])
+
+            # https://github.com/huggingface/transformers/issues/26877
+            # Use `model.generate(use_cache=True)` instead.`
+            self.model.config.use_cache = False
+
+            # packing samples using Flash Attention 2
+            self.packing_samples = packing_samples
+            if packing_samples:
+                assert use_flash_attention_2, "Only support `--packing_samples` with Flash Attention 2."
+                model_type = getattr(self.model.config, "model_type", None)
+                patch_for_block_diag_attn(model_type)
         else:
             self.model = pretrain_or_model
 
     @torch.no_grad()
-    def generate(
-        self, input_ids: torch.Tensor, **kwargs
-    ) -> Union[
+    def generate(self, input_ids: torch.Tensor, **kwargs) -> Union[
         Tuple[torch.LongTensor, torch.LongTensor],
         Tuple[torch.LongTensor, torch.LongTensor, torch.BoolTensor],
     ]:
@@ -128,7 +133,7 @@ class Actor(nn.Module):
             "attention_mask": kwargs.get("attention_mask"),
             "eos_token_id": kwargs.get("eos_token_id"),
             "pad_token_id": kwargs.get("pad_token_id"),
-            "min_new_tokens": kwargs.get("min_new_tokens ", 1),
+            "min_new_tokens": kwargs.get("min_new_tokens", 1),
         }
 
         if kwargs.get("max_new_tokens", None):
@@ -159,13 +164,18 @@ class Actor(nn.Module):
         #             break
         #
         eos_indices = seq_length - attention_mask.long().fliplr().argmax(dim=1, keepdim=True).clamp(min=1)
-        attention_mask.scatter_(dim=1, index=eos_indices, value=1)
         sequences.scatter_(dim=1, index=eos_indices, value=eos_token_id)
+
+        # For Llama3 and Qwen2 models, there are some eos_tokens in the middle of the prompt.
+        first_token_indices = attention_mask.long().argmax(dim=1, keepdim=True)
+        mask = torch.arange(seq_length).unsqueeze(0).expand(sequences.size(0), -1).to(device=sequences.device)
+        attention_mask = (mask >= first_token_indices) & (mask <= eos_indices).to(dtype=torch.long)
 
         # in RL, state_i (current token) + action_i (next token) -> state_i+1 (next token)
         state_seq = sequences[:, input_len - 1 : -1]
-        # we only calculate the loss of state_i != eos | pad
         action_mask = state_seq.ne(eos_token_id) & state_seq.ne(pad_token_id)
+        action_mask[:, 0] = 1
+
         return sequences, attention_mask, action_mask
 
     def forward(
@@ -174,20 +184,47 @@ class Actor(nn.Module):
         num_actions: int = None,
         attention_mask: Optional[torch.Tensor] = None,
         return_output=False,
+        ring_attn_group: Optional[dist.ProcessGroup] = None,
+        packed_seq_lens: Optional[list[int]] = None,
         is_inference=False,
         inference_name=None,
     ) -> torch.Tensor:
         """Returns action log probs"""
         if is_inference:
             tik = time.perf_counter()
-        output = self.model(sequences, attention_mask=attention_mask)
+        """Returns action log probs"""
+        if not self.packing_samples:
+            # https://github.com/OpenRLHF/OpenRLHF/issues/217
+            position_ids = attention_mask.long().cumsum(-1) - 1
+        else:
+            if ring_attn_group is not None:
+                # each rank within the ring group will process sequences[start:end]
+                ring_attn_rank = dist.get_rank(group=ring_attn_group)
+                ring_attn_size = dist.get_world_size(group=ring_attn_group)
+                total_seq_len = sequences.numel()
+                local_seq_len = total_seq_len // ring_attn_size
+                start, end = ring_attn_rank * local_seq_len, (ring_attn_rank + 1) * local_seq_len
+                sequences = sequences[:, start:end]
+                attention_mask = attention_mask[:, start:end]
+                position_ids = reset_ring_attn_position_ids(start, end, packed_seq_lens)
+                update_ring_attn_params(packed_seq_lens, total_seq_len)
+            else:
+                # reset the positions for packed samples
+                position_ids = reset_position_ids(attention_mask)
+        position_ids.masked_fill_(attention_mask == 0, 1)
+
+        output = self.model(sequences, attention_mask=attention_mask, position_ids=position_ids)
+
+        if return_output and num_actions is None:
+            return output
+
         log_probs = log_probs_from_logits(output["logits"][:, :-1, :], sequences[:, 1:])
         if is_inference:
             tok = time.perf_counter()
             print(f">>>>>>>>>> pure {inference_name} inference time: {tok - tik}")
 
         if return_output:
-            return output if num_actions is None else (log_probs[:, -num_actions:], output)
+            return (log_probs[:, -num_actions:], output)
         else:
             return log_probs[:, -num_actions:]
 
@@ -196,12 +233,6 @@ class Actor(nn.Module):
 
     def gradient_checkpointing_disable(self):
         self.model.gradient_checkpointing_disable()
-
-    def to_bettertransformer(self):
-        self.model = BetterTransformer.transform(self.model)
-
-    def reverse_bettertransformer(self):
-        self.model = BetterTransformer.reverse(self.model)
 
     def print_trainable_parameters(self):
         self.model.print_trainable_parameters()

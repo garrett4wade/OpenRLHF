@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 
-from datasets import Dataset, interleave_datasets, load_dataset
+from datasets import Dataset, interleave_datasets, load_dataset, load_from_disk
 from transformers import AutoTokenizer
 
 from openrlhf.utils import DeepspeedStrategy
@@ -12,19 +12,8 @@ DEFAULT_BOS_TOKEN = "<s>"
 DEFAULT_UNK_TOKEN = "<unk>"
 
 
-def get_sp_tokens(args):
-    sp_tokens = dict()
-    for key in ("bos_token", "eos_token", "pad_token", "unk_token"):
-        sp_token = getattr(args, key, None)
-        if sp_token is not None:
-            sp_tokens[key] = sp_token
-    return sp_tokens
-
-
 def get_tokenizer(pretrain, model, padding_side="left", strategy=None, use_fast=True):
-    sp_tokens = get_sp_tokens(strategy.args)
-
-    tokenizer = AutoTokenizer.from_pretrained(pretrain, trust_remote_code=True, **sp_tokens)
+    tokenizer = AutoTokenizer.from_pretrained(pretrain, trust_remote_code=True, use_fast=use_fast)
     tokenizer.padding_side = padding_side
     # NOTE: When enable vLLM, do not resize_token_embeddings, or the vocab size will mismatch with vLLM.
     # https://github.com/facebookresearch/llama-recipes/pull/196
@@ -57,6 +46,8 @@ def blending_datasets(
     max_count=5000000,
     return_eval=True,
     stopping_strategy="first_exhausted",
+    train_split="train",
+    eval_split="test",
 ):
     datasets = datasets.split(",")
     probabilities = list(map(float, probabilities.split(",")))
@@ -66,61 +57,47 @@ def blending_datasets(
     eval_data_list = []
     for i, dataset in enumerate(datasets):
         dataset = dataset.strip()
-        dataset_subfold_list = dataset.split("@")
         strategy.print(f"dataset: {dataset}")
-        # local dir with python script or common local file
-        if os.path.isdir(os.path.join(os.getcwd(), dataset)) or dataset.endswith(
-            (".json", ".jsonl", ".csv", ".parquet", ".txt")
-        ):
-            if dataset.endswith((".json", ".jsonl", ".csv", ".parquet", ".txt")):
-                files = dataset
-                data_type = os.path.splitext(files)[1][1:]
-            else:
-                path = Path(dataset)
-                script = [str(file.resolve()) for file in Path(path).rglob("*.py")]
-                extensions = ("*.json", "*.jsonl", "*.csv", "*.parquet", "*.txt")
-                files = [str(file) for ext in extensions for file in Path(path).rglob(ext)]
-                strategy.print(f"script: {script}")
-                strategy.print(f"files: {files}")
-                # For dir, follow python script or first file type
-                data_type = script[0] if len(script) == 1 else os.path.splitext(files[0])[1][1:]
-            # reformat data type
-            if data_type in ["json", "jsonl"]:
-                data_type = "json"
-            elif data_type == "txt":
-                data_type = "text"
-            elif data_type.endswith(".py"):
-                # load local dir with python script
-                files = None
-            if data_type.endswith(".py"):
-                strategy.print(f"load {dataset} with script {data_type}")
-            else:
-                strategy.print(f"load {files} from {dataset}")
-            data = load_dataset(data_type, data_files=files)
-        elif len(dataset_subfold_list) == 2:
-            dataset = dataset_subfold_list[0]
-            subfold = dataset_subfold_list[1]
-            data = load_dataset(dataset, data_dir=subfold.strip())
-        elif len(dataset_subfold_list) == 1:
-            dataset = dataset_subfold_list[0]
-            data = load_dataset(dataset)
-        else:
-            raise Exception(f"Dataset Name {dataset}: Format error")
 
-        if "train" in data:
-            train_data_list.append(data["train"].select(range(min(max_count, len(data["train"])))))
+        data_dir = dataset.split("@")[1].strip() if "@" in dataset else None
+        dataset = dataset.split("@")[0].strip()
+        dataset_basename = os.path.basename(dataset)
+
+        ext = os.path.splitext(dataset)[-1]
+        # local python script
+        if ext == ".py" or (
+            os.path.isdir(dataset) and os.path.exists(os.path.join(dataset, f"{dataset_basename}.py"))
+        ):
+            data = load_dataset(dataset, trust_remote_code=True)
+            strategy.print(f"loaded {dataset} with python script")
+        # local text file
+        elif ext in [".json", ".jsonl", ".csv"]:
+            ext = ext.lower().strip(".")
+            if ext == "jsonl":
+                ext = "json"
+            data = load_dataset(ext, data_files=dataset)
+            strategy.print(f"loaded {dataset} with data_files={dataset}")
+        # local dataset saved with `datasets.Dataset.save_to_disk`
+        elif os.path.isdir(dataset):
+            data = load_from_disk(dataset)
+            strategy.print(f"loaded {dataset} from disk")
+        # remote/local folder or common file
         else:
-            train_data_list.append(data.select(range(min(max_count, len(data)))))  # train will contains eval? TODO
+            data = load_dataset(dataset, data_dir=data_dir)
+            strategy.print(f"loaded {dataset} from files")
+
+        if train_split and train_split in data:
+            train_data = data[train_split].select(range(min(max_count, len(data[train_split]))))
+        else:
+            train_data = data.select(range(min(max_count, len(data))))
+        train_data_list.append(train_data)
 
         if return_eval:
-            if "test" in data:
-                eval_data = data["test"].select(range(min(int(max_count * 0.1), len(data["test"]))))
-            elif "validation" in data:
-                eval_data = data["validation"].select(range(min(int(max_count * 0.1), len(data["validation"]))))
-            elif "train" in data:
-                eval_data = data["train"].select(range(min(int(max_count * 0.1), int(len(data["train"]) * 0.01))))
+            if eval_split and eval_split in data:
+                eval_data = data[eval_split].select(range(min(max_count, len(data[eval_split]))))
+            # train will contains eval? TODO
             else:
-                eval_data = data.select(range(min(int(max_count * 0.1), int(len(data) * 0.001))))
+                eval_data = train_data.select(range(min(max_count, int(len(train_data) * 0.03))))
             eval_data_list.append(eval_data)
 
     # merge datasets

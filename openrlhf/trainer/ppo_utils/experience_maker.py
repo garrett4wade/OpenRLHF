@@ -12,7 +12,8 @@ from tqdm import tqdm
 
 from openrlhf.models.actor import Actor
 from openrlhf.models.utils import compute_reward, masked_mean
-from openrlhf.utils.logging import init_logger
+from openrlhf.utils.logging_utils import init_logger
+from openrlhf.utils.remote_rm_utils import remote_rm_fn, remote_rm_fn_ray
 
 logger = init_logger(__name__)
 
@@ -26,9 +27,9 @@ class Experience:
     Shapes of each tensor:
     sequences: (B, S)
     action_log_probs: (B, A)
-    values: (B)
-    returns: (B)
-    advatanges: (B)
+    values: (B, A)
+    returns: (B, A)
+    advatanges: (B, A)
     attention_mask: (B, S)
     action_mask: (B, A)
 
@@ -84,12 +85,14 @@ class NaiveExperienceMaker(ABC):
         prompt_max_len: int,
         kl_controller,
         strategy=None,
+        remote_rm_url: str = None,
         reward_fn=None,
     ) -> None:
         super().__init__()
         self.actor = actor
         self.critic = critic
         self.reward_model = reward_model
+        self.remote_rm_url = remote_rm_url
         self.initial_model = initial_model
         self.tokenizer = tokenizer
         self.prompt_max_len = prompt_max_len
@@ -102,6 +105,7 @@ class NaiveExperienceMaker(ABC):
         batch = self.tokenizer(
             texts,
             return_tensors="pt",
+            add_special_tokens=False,
             max_length=max_length,
             padding=True,
             truncation=True,
@@ -113,7 +117,8 @@ class NaiveExperienceMaker(ABC):
         self.actor.eval()
         self.critic.eval()
         self.initial_model.eval()
-        self.reward_model.eval()
+        if self.reward_model is not None:
+            self.reward_model.eval()
 
         # generate seq
         gs = time.perf_counter()
@@ -134,7 +139,13 @@ class NaiveExperienceMaker(ABC):
         value = self.critic(sequences, action_mask, attention_mask)
 
         # rewards
-        r = self.reward_model(sequences, attention_mask)
+        if self.remote_rm_url is not None:
+            # remote RM
+            queries = self.tokenizer.batch_decode(sequences.cpu(), skip_special_tokens=False)
+            r = remote_rm_fn(self.remote_rm_url, queries=queries).to(device=action_log_probs.device)
+        else:
+            # local RM
+            r = self.reward_model(sequences, attention_mask)
 
         reward, kl = compute_reward(
             r,
@@ -258,10 +269,27 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         # values
         value_ref = self.critic.forward.remote(sequences_cpu, action_mask_cpu, attention_mask_cpu, True, "critic")
 
+        # avoid CUDA OOM when colocate models
+        if self.strategy.args.colocate_critic_reward:
+            ray.get([value_ref])
+            ray.get([self.critic.empty_cache.remote()])
+
+        if self.strategy.args.colocate_actor_ref:
+            ray.get([base_action_log_probs_ref])
+            ray.get([self.initial_model.empty_cache.remote()])
+
         # rewards
         r_refs = []
-        for rm in self.reward_model:
-            r_refs.append(rm.forward.remote(sequences_cpu, attention_mask_cpu, True, "reward"))
+        # support remote RM API with ray
+        if not self.remote_rm_url:
+            for rm in self.reward_model:
+                r_refs.append(rm.forward.remote(sequences_cpu, attention_mask_cpu))
+        else:
+            # remote RM
+            for rm in self.remote_rm_url:
+                queries = self.tokenizer.batch_decode(sequences.cpu(), skip_special_tokens=False)
+                r = remote_rm_fn_ray.remote(rm, queries=queries)
+                r_refs.append(r)
 
         # log probs
         start = time.time()
@@ -277,6 +305,13 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         base_action_log_probs, value = base_action_log_probs.to(device), value.to(device)
         rewards = [r.to(device) for r in rewards]
         r = self.reward_fn(rewards) if len(rewards) > 0 else rewards[0]
+
+        # avoid CUDA OOM when colocate models
+        if self.strategy.args.colocate_critic_reward and not self.remote_rm_url:
+            ray.get([self.reward_model[0].empty_cache.remote()])
+
+        if self.strategy.args.colocate_actor_ref:
+            torch.cuda.empty_cache()
 
         reward, kl = compute_reward(
             r,
@@ -343,8 +378,9 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             temperature=kwargs.get("temperature", 1.0),
             top_p=kwargs.get("top_p", 1.0),
             top_k=kwargs.get("top_k", -1),
-            max_tokens=kwargs.get("max_new_tokens", 16),
-            ignore_eos=True,
+            max_tokens=kwargs.get("max_new_tokens", 1024),
+            min_tokens=kwargs.get("min_new_tokens", 1),
+            skip_special_tokens=kwargs.get("skip_special_tokens", False),
         )
 
         # TODO: can't pass `max_length` to vLLM's tokenizer for input truncation, remove this once it is supported.
@@ -364,28 +400,22 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         # |<---------- prompt ----------->|<-------- answer ------->|
         max_input_len, max_output_len = 0, 0
         for output in outputs:
-            # TODO: how to force vLLM generate at least one token?
-            output_token_ids = output.outputs[0].token_ids
-            if output_token_ids[0] == self.tokenizer.eos_token_id:
-                logger.warning(f"Only EOS output for prompt: {output.prompt}")
-                output.outputs[0].token_ids = [self.tokenizer.unk_token_id, self.tokenizer.eos_token_id]
-
             max_input_len = max(max_input_len, len(output.prompt_token_ids))
-            max_output_len = max(max_output_len, len(output_token_ids))
+            max_output_len = max(max_output_len, len(output.outputs[0].token_ids))
 
         pad_token_id, eos_token_id = self.tokenizer.pad_token_id, self.tokenizer.eos_token_id
         sequences = []
         for output in outputs:
             # left padding input
             input_len = len(output.prompt_token_ids)
-            input_ids = [pad_token_id] * (max_input_len - input_len) + output.prompt_token_ids
+            input_ids = [pad_token_id] * (max_input_len - input_len) + list(output.prompt_token_ids)
 
             # right padding output
             output_len = len(output.outputs[0].token_ids)
-            output_ids = output.outputs[0].token_ids + [pad_token_id] * (max_output_len - output_len)
+            output_ids = list(output.outputs[0].token_ids) + [pad_token_id] * (max_output_len - output_len)
+
             if output_ids[output_len - 1] != eos_token_id:
-                assert output_len == max_output_len
-                output_ids[-1] = eos_token_id
+                output_ids[min(output_len, len(output_ids) - 1)] = eos_token_id
 
             # concat input and output
             sequences.append(input_ids + output_ids)

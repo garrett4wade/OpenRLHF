@@ -12,11 +12,12 @@ import torch.distributed
 import pynvml
 import time
 from torch.optim import Optimizer
-from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from openrlhf.models import Actor, GPTLMLoss, PolicyLoss, SwitchBalancingLoss, ValueLoss
+from openrlhf.models import Actor, GPTLMLoss, PolicyLoss, ValueLoss
 from openrlhf.models.utils import masked_mean
+from openrlhf.utils.distributed_sampler import DistributedSampler
 
 from .ppo_utils import AdaptiveKLController, Experience, FixedKLController, NaiveExperienceMaker, NaiveReplayBuffer
 
@@ -184,6 +185,7 @@ class PPOTrainer(ABC):
         dataloader_pin_memory (bool, defaults to True): whether to pin memory for data loader
         callbacks (List[Callback], defaults to []): the callbacks to call during training process
         generate_kwargs (dict, optional): the kwargs to use while model generating
+        remote_rm_url (str, optional): function for reward model api
     """
 
     def __init__(
@@ -215,6 +217,7 @@ class PPOTrainer(ABC):
         tokenizer: Optional[Callable[[Any], dict]] = None,
         prompt_max_len: int = 128,
         dataloader_pin_memory: bool = True,
+        remote_rm_url: str = None,
         reward_fn: Callable[[List[torch.Tensor]], torch.Tensor] = None,
         **generate_kwargs,
     ) -> None:
@@ -242,6 +245,7 @@ class PPOTrainer(ABC):
         self.actor = actor
         self.critic = critic
         self.reward_model = reward_model
+        self.remote_rm_url = remote_rm_url
         self.initial_model = initial_model
         self.ema_model = ema_model
         self.actor_optim = actor_optim
@@ -253,6 +257,8 @@ class PPOTrainer(ABC):
         self.critic_loss_fn = ValueLoss(value_clip)
         self.ptx_loss_fn = GPTLMLoss()
 
+        self.freezing_actor_steps = getattr(self.args, "freezing_actor_steps", -1)
+
         # Mixtral 8x7b
         self.aux_loss = self.args.aux_loss_coef > 1e-8
 
@@ -262,7 +268,16 @@ class PPOTrainer(ABC):
             self.kl_ctl = FixedKLController(init_kl_coef)
 
         self.experience_maker = NaiveExperienceMaker(
-            actor, critic, reward_model, initial_model, tokenizer, prompt_max_len, self.kl_ctl, strategy, reward_fn
+            actor,
+            critic,
+            reward_model,
+            initial_model,
+            tokenizer,
+            prompt_max_len,
+            self.kl_ctl,
+            strategy,
+            remote_rm_url,
+            reward_fn,
         )
         self.replay_buffer = NaiveReplayBuffer(micro_train_batch_size, buffer_limit, buffer_cpu_offload)
 
@@ -271,7 +286,8 @@ class PPOTrainer(ABC):
             import wandb
 
             self._wandb = wandb
-            wandb.login(key=strategy.args.use_wandb)
+            if not wandb.api.api_key:
+                wandb.login(key=strategy.args.use_wandb)
             wandb.init(
                 entity=strategy.args.wandb_org,
                 project=strategy.args.wandb_project,
@@ -290,9 +306,12 @@ class PPOTrainer(ABC):
 
     def fit(
         self,
+        args,
         prompts_dataloader,
         pretrain_dataloader,
         args,
+        consumed_samples=0,
+        num_update_steps_per_episodes=1,
         hf_actor_config=None,
         hf_critic_config=None,
     ) -> None:
@@ -317,23 +336,35 @@ class PPOTrainer(ABC):
         self.prompts_dataloader = prompts_dataloader
         self.pretrain_dataloader = pretrain_dataloader
 
+        num_rollouts_per_episodes = (
+            num_update_steps_per_episodes * args.train_batch_size // args.max_epochs // args.rollout_batch_size
+        )
         update_timesteps = args.rollout_batch_size // (self.strategy.world_size * self.micro_rollout_batch_size)
-        global_step = 1
 
         # get eval and save steps
         if args.eval_steps == -1:
-            args.eval_steps = prompts_dataloader.__len__() // update_timesteps  # Evaluate once per epoch
+            args.eval_steps = num_rollouts_per_episodes  # Evaluate once per epoch
         if args.save_steps == -1:
             args.save_steps = float("inf")  # do not save ckpt
 
-        for episode in range(args.num_episodes):
+        self.prompts_dataloader = prompts_dataloader
+        self.pretrain_dataloader = pretrain_dataloader
+
+        # Restore step and start_epoch
+        steps = consumed_samples // args.rollout_batch_size * update_timesteps + 1
+        start_episode = consumed_samples // args.rollout_batch_size // num_rollouts_per_episodes
+        consumed_samples = consumed_samples % (num_rollouts_per_episodes * args.rollout_batch_size)
+
+        for episode in range(start_episode, args.num_episodes):
             if isinstance(self.prompts_dataloader.sampler, DistributedSampler):
-                self.prompts_dataloader.sampler.set_epoch(episode)
-            # pbar = tqdm(
-            #     range(self.prompts_dataloader.__len__()),
-            #     desc=f"Episode [{episode + 1}/{args.num_episodes}]",
-            #     disable=not self.strategy.is_rank_0(),
-            # )
+                self.prompts_dataloader.sampler.set_epoch(
+                    episode, consumed_samples=0 if episode > start_episode else consumed_samples
+                )
+            pbar = tqdm(
+                range(self.prompts_dataloader.__len__()),
+                desc=f"Episode [{episode + 1}/{args.num_episodes}]",
+                disable=not self.strategy.is_rank_0(),
+            )
 
             train_iter_tik = time.perf_counter()
             for rand_prompts in self.prompts_dataloader:
@@ -348,7 +379,9 @@ class PPOTrainer(ABC):
                 self.replay_buffer.append(experience)
                 print(">>>> update timesteps", update_timesteps)
 
-                if global_step % update_timesteps == 0:
+                if steps % update_timesteps == 0:
+                    global_steps = steps // update_timesteps
+
                     torch.cuda.empty_cache()
                     ts = time.perf_counter()
                     self.replay_buffer.normalize("advantages", self.strategy)
@@ -386,7 +419,7 @@ class PPOTrainer(ABC):
         if self.gpu_monior_proc is not None:
             self.gpu_monior_proc.kill()
 
-    def ppo_train(self):
+    def ppo_train(self, global_steps=0):
         # replay buffer may be empty at first, we should rebuild at each training
         dataloader = DataLoader(
             self.replay_buffer,
@@ -409,29 +442,37 @@ class PPOTrainer(ABC):
             )
             for experience in pbar:
                 experience.to_device(device)
-                status = self.training_step(experience)
+                status = self.training_step(experience, global_steps)
 
                 # for DP
                 # weighted mean for kl
-                status["kl"] *= status["response_length"]
-                status = self.strategy.all_reduce(status)
-                status["kl"] /= status["response_length"]
+                if "kl" in status:
+                    status["kl"] *= status["response_length"]
+                    status = self.strategy.all_reduce(status)
+                    status["kl"] /= status["response_length"]
 
-                status_list.append(status)
-                short_status = {
-                    "pg": status["policy_loss"],
-                    "rm": status["reward"],
-                    "ret": status["return"],
-                    "glen": status["response_length"],
-                    "tlen": status["total_length"],
-                    "kl": status["kl"],
-                }
+                short_status = {}
+
+                if "policy_loss" in status:
+                    short_status = {
+                        "pg": status["policy_loss"],
+                        "rm": status["reward"],
+                        "ret": status["return"],
+                        "glen": status["response_length"],
+                        "tlen": status["total_length"],
+                        "kl": status["kl"],
+                        "act_lr": status["actor_lr"],
+                    }
+
                 if "critic_loss" in status:
                     short_status["cri"] = status["critic_loss"]
                     short_status["vals"] = status["values"]
+                    short_status["cri_lr"] = status["critic_lr"]
 
                 if "ptx_loss" in status:
                     short_status["ptx"] = status["ptx_loss"]
+
+                status_list.append(status)
                 pbar.set_postfix(short_status)
 
         if status_list:
@@ -443,8 +484,10 @@ class PPOTrainer(ABC):
                 status_mean[k] /= len(status_list)
         return status_mean
 
-    def training_step(self, experience: Experience) -> Dict[str, float]:
-        status = self.training_step_actor(experience)
+    def training_step(self, experience: Experience, global_steps) -> Dict[str, float]:
+        status = {}
+        if global_steps > self.freezing_actor_steps:
+            status = self.training_step_actor(experience)
         status.update(self.training_step_critic(experience))
         return status
 
@@ -504,9 +547,7 @@ class PPOTrainer(ABC):
             self.strategy.moving_average(self.actor, self.ema_model, self.ema_beta, "cpu")
 
         # status
-        status = {
-            "policy_loss": actor_loss.item(),
-        }
+        status = {"policy_loss": actor_loss.item(), "actor_lr": self.actor_scheduler.get_last_lr()[0]}
         if self.pretrain_dataloader is not None:
             status["ptx_loss"] = ptx_loss.item()
         for k, v in experience.info.items():
@@ -553,15 +594,14 @@ class PPOTrainer(ABC):
         status = {
             "critic_loss": critic_loss.item(),
             "values": masked_mean(values, experience.action_mask).item(),
+            "critic_lr": self.critic_scheduler.get_last_lr()[0],
         }
         bwd_t = time.perf_counter() - t2
         print(f">>>> critic forward time {fwd_t:.2f}s, backward time {bwd_t:.2f}s, #seqs={experience.attention_mask.shape[0]}")
         return status
 
-    def save_logs_and_checkpoints(self, args, global_step, step_bar, logs_dict={}):
+    def save_logs_and_checkpoints(self, args, global_step, step_bar, logs_dict={}, client_states={}):
         if global_step % args.logging_steps == 0:
-            # step bar
-            step_bar.set_postfix(logs_dict)
             # wandb
             if self._wandb is not None and self.strategy.is_rank_0():
                 logs = {
@@ -581,9 +621,17 @@ class PPOTrainer(ABC):
         # TODO: save best model on dev, use loss/perplexity/others on whole dev dataset as metric
         if global_step % args.save_steps == 0:
             tag = f"global_step{global_step}"
-            self.strategy.save_ckpt(
-                self.actor.model, os.path.join(args.ckpt_path, "_actor"), tag, args.max_ckpt_num, args.max_ckpt_mem
-            )
-            self.strategy.save_ckpt(
-                self.critic, os.path.join(args.ckpt_path, "_critic"), tag, args.max_ckpt_num, args.max_ckpt_mem
-            )
+            self._save_checkpoint(args, tag, client_states)
+
+    def _save_checkpoint(self, args, tag, client_states):
+        self.strategy.save_ckpt(
+            self.actor.model,
+            os.path.join(args.ckpt_path, "_actor"),
+            tag,
+            args.max_ckpt_num,
+            args.max_ckpt_mem,
+            client_states,
+        )
+        self.strategy.save_ckpt(
+            self.critic, os.path.join(args.ckpt_path, "_critic"), tag, args.max_ckpt_num, args.max_ckpt_mem
+        )
