@@ -51,33 +51,29 @@ def get_nodelist_and_device_partition(
     colocate_ref_reward = False
     if n_gpus == 8:
         # actor, critic, ref, rew, vllm-engine
-        if scale_actor and not scale_critic:
-            device_partition = (4, 2, 1, 1, 0)
-        else:
-            colocate_actor_critic = True
-            device_partition = (4, 4, 1, 1, 2)
-        nodelist = "QH-com41"
+        device_partition = (4, 2, 1, 1, 0)
+        nodelist = "QH-com20"
     elif n_gpus == 16:
         if scale_actor and not scale_critic:
             device_partition = (8, 4, 2, 2, 0)
         else:
             colocate_actor_critic = True
             device_partition = (8, 8, 2, 2, 4)
-        nodelist = "QH-com[42-43]"
+        nodelist = "QH-com[21-22]"
     elif n_gpus == 32:
         if scale_actor and not scale_critic:
             device_partition = (16, 4, 4, 2, 6)
         else:
             colocate_actor_critic = True
             device_partition = (16, 16, 4, 8, 4)
-        nodelist = "QH-com[44-47]"
+        nodelist = "QH-com[24-27]"
     elif n_gpus == 64:
         if scale_actor and not scale_critic:
             device_partition = (32, 8, 8, 4, 12)
         else:
             colocate_actor_critic = True
             device_partition = (32, 32, 8, 8, 16)
-        nodelist = "QH-com[20-22,24-28]"
+        nodelist = "QH-com[41-48]"
     elif n_gpus == 128:
         if scale_actor and not scale_critic:
             device_partition = (64, 8, 16, 8, 32)

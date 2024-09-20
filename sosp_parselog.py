@@ -74,9 +74,13 @@ def _parselog(
     thpt_records = []
     max_mem = 0.0
     gen_time_record = []
-    train_time_record = []
     actor_train_time_record = []
     critic_train_time_record = []
+    actor_inf_record = []
+    ref_inf_record = []
+    critic_inf_record = []
+    rew_inf_record = []
+    param_sync_record = []
     try:
         with open(logpath, "r", errors="ignore") as f:
             lines = f.readlines()
@@ -92,12 +96,12 @@ def _parselog(
                     tflops_records.append(tflops)
                     thpt = float(line.split(", Samples/sec: ")[1].split(",")[0])
                     thpt_records.append(thpt)
-                if "Generation => Latency: " in line:
-                    gen_time = float(line.split("Generation => Latency: ")[1].split("s,")[0])
+                if "pure generate time: " in line:
+                    gen_time = float(line.split("pure generate time: ")[1])
                     gen_time_record.append(gen_time)
-                if "Training   => Latency: " in line:
-                    train_time = float(line.split("Training   => Latency: ")[1].split("s,")[0])
-                    train_time_record.append(train_time)
+                # if "Training   => Latency: " in line:
+                #     train_time = float(line.split("Training   => Latency: ")[1].split("s,")[0])
+                #     train_time_record.append(train_time)
                 if "Compute Utilization - " in line:
                     mem = float(line.split("Used Memory - ")[1].split("MB,")[0])
                     if "pid" in line:
@@ -112,11 +116,25 @@ def _parselog(
                     fwd_time = float(line.split("critic forward time ")[1].split("s")[0])
                     bwd_time = float(line.split(", backward time ")[1].split("s")[0])
                     critic_train_time_record.append(fwd_time + bwd_time)
+                if "pure actor inference time: " in line:
+                    actor_inf = float(line.split("pure actor inference time: ")[1])
+                    actor_inf_record.append(actor_inf)
+                if "pure ref inference time: " in line:
+                    ref_inf = float(line.split("pure ref inference time: ")[1])
+                    ref_inf_record.append(ref_inf)
+                if "pure critic inference time: " in line:
+                    critic_inf = float(line.split("pure critic inference time: ")[1])
+                    critic_inf_record.append(critic_inf)
+                if "pure reward inference time: " in line:
+                    rew_inf = float(line.split("pure reward inference time: ")[1])
+                    rew_inf_record.append(rew_inf)
+                if "broadcast weights to vllm engines cost: " in line:
+                    param_sync_record.append(float(line.split("broadcast weights to vllm engines cost: ")[1]))
     except FileNotFoundError:
         # print(f"File not found: {logpath}")
         return False
     time_records = time_records[2:]
-    train_time_record = train_time_record[2:]
+    # train_time_record = train_time_record[2:]
     gen_time_record = gen_time_record[2:]
     if not oom:
         if len(time_records) == 0 or len(tflops_records) == 0 or len(thpt_records) == 0 or max_mem == 0.0:
@@ -127,13 +145,21 @@ def _parselog(
         max_time = np.max(time_records)
         cil, cih = t_score_ci(time_records)
         n_time = len(time_records)
-        avg_train_time = np.mean(train_time_record)
+        # avg_train_time = np.mean(train_time_record)
         avg_gen_time = np.mean(gen_time_record)
         avg_actor_train_time = np.mean(actor_train_time_record)
         avg_critic_train_time = np.mean(critic_train_time_record)
-        assert len(train_time_record) == n_time == len(gen_time_record)
+        # assert len(train_time_record) == n_time == len(gen_time_record)
         avg_tflops = np.mean(tflops_records)
         thpt = np.mean(thpt_records)
+        avg_actor_inf_time = np.mean(actor_inf_record)
+        avg_ref_inf_time = np.mean(ref_inf_record)
+        avg_critic_inf_time = np.mean(critic_inf_record)
+        avg_rew_inf_time = np.mean(rew_inf_record)
+        if len(param_sync_record) > 0:
+            avg_param_sync_time = np.mean(param_sync_record)
+        else:
+            avg_param_sync_time = 0.0
     else:
         avg_time = float("inf")
         avg_train_time = float("inf")
@@ -145,7 +171,9 @@ def _parselog(
         var_time = float("nan")
         avg_tflops = -float("inf")
         thpt = -float("inf")
+        avg_actor_inf_time = avg_ref_inf_time = avg_critic_inf_time = avg_rew_inf_time = float("inf")
         max_mem = 0.0
+        avg_param_sync_time = float("nan")
     d = dict(
         a=actor_size,
         c=critic_size,
@@ -164,11 +192,23 @@ def _parselog(
         cil=cil,
         cih=cih,
         avg_gt=avg_gen_time,
-        avg_tt=avg_train_time,
-        avg_it=avg_time - avg_train_time - avg_gen_time,
+        avg_tt=4 * max(avg_actor_train_time, avg_critic_train_time),
+        avg_it=max(avg_actor_inf_time, avg_critic_inf_time, avg_ref_inf_time, avg_rew_inf_time),
+        avg_pst=avg_param_sync_time,
+        avg_ovhd=avg_time
+        - 4 * max(avg_actor_train_time, avg_critic_train_time)
+        - avg_gen_time
+        - max(avg_actor_inf_time, avg_critic_inf_time, avg_ref_inf_time, avg_rew_inf_time)
+        - avg_param_sync_time,
+        avg_att=avg_actor_train_time * 4,
+        avg_ctt=avg_critic_train_time * 4,
+        avg_ait=avg_actor_inf_time,
+        avg_cit=avg_critic_inf_time,
+        avg_rfit=avg_ref_inf_time,
+        avg_rit=avg_rew_inf_time,
         avg_mb_at=avg_actor_train_time,
         avg_mb_ct=avg_critic_train_time,
-        pc_t=max(0, (avg_train_time - 4 * max(avg_actor_train_time, avg_critic_train_time))),
+        # pc_t=max(0, (avg_train_time - 4 * max(avg_actor_train_time, avg_critic_train_time))),
         n=n_time,
         log_path=logpath,
         # WorkerMaxMem=worker_max_mem,

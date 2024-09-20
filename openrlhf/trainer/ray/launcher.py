@@ -107,10 +107,16 @@ class ReferenceModelRayActor(BasePPORole):
         num_actions: int = None,
         attention_mask: Optional[torch.Tensor] = None,
         return_output=False,
+        is_inference=False,
+        inference_name=None,
     ) -> torch.Tensor:
         device = torch.cuda.current_device()
+        sequences = sequences.to(device)
+        attention_mask = attention_mask.to(device)
         with torch.no_grad():
-            log_probs = self.model(sequences.to(device), num_actions, attention_mask.to(device), return_output)
+            log_probs = self.model(sequences, num_actions, attention_mask, return_output,
+                                   is_inference=is_inference,
+                                   inference_name=inference_name)
         return log_probs.to("cpu")
 
 
@@ -134,10 +140,17 @@ class RewardModelRayActor(BasePPORole):
         self.model = self.strategy.prepare(model, is_rlhf=True)
         self.model.eval()
 
-    def forward(self, sequences: torch.LongTensor, attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, sequences: torch.LongTensor, attention_mask: Optional[torch.Tensor] = None, is_inference=False,
+        inference_name=None,) -> torch.Tensor:
         device = torch.cuda.current_device()
+        sequences = sequences.to(device)
+        attention_mask = attention_mask.to(device)
         with torch.no_grad():
-            reward = self.model(sequences.to(device), attention_mask.to(device))
+            if is_inference:
+                tik = time.perf_counter()
+            reward = self.model(sequences, attention_mask)
+            if is_inference:
+                print(f">>>>>>>>>>>> pure {inference_name} inference time: {time.perf_counter() - tik}")
         return reward.to("cpu")
 
 

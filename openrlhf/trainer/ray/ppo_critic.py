@@ -12,7 +12,7 @@ from openrlhf.models import Actor, get_llm_for_sequence_regression
 from openrlhf.trainer import PPOTrainer
 from openrlhf.trainer.ppo_utils import Experience
 from openrlhf.utils import DeepspeedStrategy, blending_datasets, get_tokenizer
-
+import time
 from .launcher import BasePPORole
 
 
@@ -147,14 +147,24 @@ class CriticModelRayActor(BasePPORole):
         sequences: torch.LongTensor,
         action_mask: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
+        is_inference =False,
+        inference_name=None,
     ) -> torch.Tensor:
         """Generates critic values."""
         device = next(self.critic.parameters()).device
         print(device)
         # device = torch.cuda.current_device()
         self.critic.eval()
+        sequences = sequences.to(device)
+        action_mask = action_mask.to(device)
+        attention_mask = attention_mask.to(device)
         with torch.no_grad():
-            value = self.critic(sequences.to(device), action_mask.to(device), attention_mask.to(device))
+            if is_inference:
+                tik = time.perf_counter()
+            value = self.critic(sequences, action_mask, attention_mask)
+            if is_inference:
+                tok = time.perf_counter()
+                print(f">>>>>>>>>>>>> pure {inference_name} inference time: {tok - tik}")
         self.critic.train()  # reset model state
         return value.to("cpu")
 

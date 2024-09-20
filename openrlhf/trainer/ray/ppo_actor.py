@@ -1,6 +1,7 @@
 import itertools
 import math
 import os
+import time
 import socket
 from copy import deepcopy
 from typing import Callable, Dict, List, Tuple
@@ -108,7 +109,9 @@ class ActorPPOTrainer(PPOTrainer):
 
         # 4. broadcast weights to vllm engines
         if self.vllm_engines is not None:
-            self._broadcast_to_vllm()
+            update_weight_jobs, bcast_tik = self._broadcast_to_vllm()
+            ray.get(update_weight_jobs)
+            print(">>>>>>>>> broadcast weights to vllm engines cost: ", time.perf_counter() - bcast_tik)
 
         # 5. wait remote critic model training done
         if self.critic_train_remote:
@@ -123,13 +126,15 @@ class ActorPPOTrainer(PPOTrainer):
     def _broadcast_to_vllm(self):
         model = self.actor.model.module
         count, num_params = 0, len(list(model.named_parameters()))
+        tik = time.perf_counter()
+        update_weight_jobs = []
         for name, param in model.named_parameters():
             count += 1  # empty_cache at last param
 
             # Fire all vllm engines for broadcast
             if torch.distributed.get_rank() == 0:
                 shape = param.shape if self.strategy.args.zero_stage != 3 else param.ds_shape
-                [
+                update_weight_jobs+= [
                     engine.update_weight.remote(name, dtype=param.dtype, shape=shape, empty_cache=count == num_params)
                     for engine in self.vllm_engines
                 ]
@@ -145,7 +150,7 @@ class ActorPPOTrainer(PPOTrainer):
                 with deepspeed.zero.GatheredParameters(nonactive_params):
                     if torch.distributed.get_rank() == 0:
                         torch.distributed.broadcast(param.data, 0, group=self._model_update_group)
-
+        return update_weight_jobs, tik
 
 @ray.remote(num_gpus=1)
 class ActorModelRayActor(BasePPORole):

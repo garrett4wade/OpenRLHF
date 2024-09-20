@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from optimum.bettertransformer import BetterTransformer
 from peft import LoraConfig, TaskType, get_peft_config, get_peft_model
 from peft.tuners.lora import LoraLayer
+import time
 from transformers import AutoModelForCausalLM, BitsAndBytesConfig, PreTrainedModel
 from transformers.deepspeed import HfDeepSpeedConfig
 from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
@@ -173,10 +174,17 @@ class Actor(nn.Module):
         num_actions: int = None,
         attention_mask: Optional[torch.Tensor] = None,
         return_output=False,
+        is_inference=False,
+        inference_name=None,
     ) -> torch.Tensor:
         """Returns action log probs"""
+        if is_inference:
+            tik = time.perf_counter()
         output = self.model(sequences, attention_mask=attention_mask)
         log_probs = log_probs_from_logits(output["logits"][:, :-1, :], sequences[:, 1:])
+        if is_inference:
+            tok = time.perf_counter()
+            print(f">>>>>>>>>> pure {inference_name} inference time: {tok - tik}")
 
         if return_output:
             return output if num_actions is None else (log_probs[:, -num_actions:], output)

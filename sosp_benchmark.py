@@ -74,7 +74,7 @@ def build_default_sweep_settings(model_size: int, gpu_scale_factor: int):
         n_gpus = default_n_gpus * gpu_scale_factor
         global_bs_seqlens = [(128, 896), (256, 384), (512, 128)]
         for zero_stage, offload, (global_bs, genlen) in itertools.product(
-            zero_stages, [False, True], global_bs_seqlens
+            zero_stages, [True, False], global_bs_seqlens
         ):
             assert global_bs * (128 + genlen) == 2**17
             settings.append(
