@@ -12,15 +12,14 @@ python3 -m openrlhf.cli.train_ppo_ray \
    --vllm_tensor_parallel_size 2 \
    --colocate_critic_reward \
    --colocate_actor_ref \
-   --pretrain /lustre/public/pretrained_model_weights/llama2/Llama-2-7b-hf/ \
-   --reward_pretrain /lustre/public/pretrained_model_weights/llama2/Llama-2-7b-hf/ \
-   --micro_train_batch_size 8 \
-   --train_batch_size 128 \
-   --micro_rollout_batch_size 16 \
-   --critic_micro_train_batch_size 8 \
-   --rollout_batch_size 1024 \
-   --max_samples 100000 \
-   --max_epochs 1 \
+   --ref_reward_offload \
+   --pretrain /mnt/bs_fs/models/CodeLlama-7b-hf/ \
+   --reward_pretrain /mnt/bs_fs/models/CodeLlama-7b-hf/ \
+   --micro_train_batch_size 4 \
+   --critic_micro_train_batch_size 4 \
+   --train_batch_size 8 \
+   --micro_rollout_batch_size 32 \
+   --rollout_batch_size 64 \
    --prompt_max_len 1024 \
    --generate_max_len 1024 \
    --zero_stage 3 \

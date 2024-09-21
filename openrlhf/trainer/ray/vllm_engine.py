@@ -40,8 +40,9 @@ logger = init_logger(__name__)
 
 @ray.remote
 class LLMRayActor:
-    def __init__(self, *args, **kwargs):
+    def __init__(self, idx, *args, **kwargs):
         import vllm
+        print(">>>>>>>>>>>>>>>>", os.getenv("CUDA_VISIBLE_DEVICES"))
 
         self.__version__ = vllm.__version__
         assert self.__version__ >= "0.4.1", "OpenRLHF only supports vLLM >= 0.4.1"
@@ -73,9 +74,9 @@ class LLMRayActor:
 
         self.llm = vllm.LLM(*args, **kwargs)
 
-        if idx == 0:
-            self._gpu_monitor_proc = mp.Process(target=gpu_utilization_monitor, args=(f"vLLM", idx, 7200))
-            self._gpu_monitor_proc.start()
+        # if idx == 0:
+        #     self._gpu_monitor_proc = mp.Process(target=gpu_utilization_monitor, args=(f"vLLM", idx, 7200))
+        #     self._gpu_monitor_proc.start()
 
     def generate(self, *args, **kwargs):
         return self.llm.generate(*args, **kwargs)
@@ -121,7 +122,7 @@ def create_vllm_engines(
 
         if tensor_parallel_size > 1:
             num_gpus = 0.1
-            bundles = [{"GPU": 1, "CPU": 1}] * tensor_parallel_size
+            bundles = [{"GPU": 1, "CPU": 2}] * tensor_parallel_size
             pg = placement_group(bundles)
             ray.get(pg.ready())
 
@@ -135,13 +136,16 @@ def create_vllm_engines(
                 num_gpus=num_gpus,
                 scheduling_strategy=scheduling_strategy,
             ).remote(
+                i,
                 pretrain,
                 trust_remote_code=True,
                 tensor_parallel_size=tensor_parallel_size,
-                dtype="bfloat16",
+                dtype="float16",
                 seed=seed + i,
                 enable_prefix_caching=enable_prefix_caching,
                 max_model_len=max_model_len,
+                disable_custom_all_reduce=True,
+                load_format="dummy",
             )
         )
 

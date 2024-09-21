@@ -71,6 +71,7 @@ def print_throughput_step3(actor_hf_config, critic_hf_config,
                            args,
                            e2e_time,
                            gen_exp_time,
+                           inf_time,
                            train_time,
                            rank=0):
     if rank != 0:
@@ -144,7 +145,7 @@ def print_throughput_step3(actor_hf_config, critic_hf_config,
         f"End-to-End => Latency: {e2e_time:.2f}s, TFLOPs: {total_tflops:.2f}, Samples/sec: {samples_per_second:.2f}, Time/seq {e2e_time/batch_size:.2f}s, Batch Size: {batch_size}, Total Seq. Length: {seq_length}"
     )
     print(
-        f"Generation => Latency: {gen_exp_time:.2f}s, Per-token Latency {pertok_lat*1000:.2f} ms, TFLOPs: {gen_tflops:.2f}, BW: {gen_bw if num_bytes > 0 else num_bytes:.2f} GB/sec, Answer Seq. Length: {max_answer_len}"
+        f"Generation => Latency: {gen_exp_time:.2f}s, Inference {inf_time:.2f}s, Per-token Latency {pertok_lat*1000:.2f} ms, TFLOPs: {gen_tflops:.2f}, BW: {gen_bw if num_bytes > 0 else num_bytes:.2f} GB/sec, Answer Seq. Length: {max_answer_len}"
     )
     print(
         f"Training   => Latency: {train_time:.2f}s, TFLOPs: {train_tflops:.2f}"
@@ -326,14 +327,31 @@ class PPOTrainer(ABC):
             hf_critic_config._num_params = _count_params(self.experience_maker.critic)
             n_actor_gpus = n_critic_gpus = torch.distributed.get_world_size()
             # launch monitor process for non-ray training
-            if self.gpu_monior_proc is None:
-                self.gpu_monior_proc = mp.Process(target=gpu_utilization_monitor, args=(torch.cuda.current_device(), 3600))
-                self.gpu_monior_proc.start()
-        
+            # if self.gpu_monior_proc is None:
+            #     self.gpu_monior_proc = mp.Process(target=gpu_utilization_monitor, args=(torch.cuda.current_device(), 3600))
+            #     self.gpu_monior_proc.start()
+
+        """
+        Notes by Wei:
+        + `max_epochs` is actually ppo_epochs, aka how many times we will run over the sampled batch, usually 1.
+        + `episodes` is `epoch`, aka the number of times we iterate over all prompts
+        + `micro_train_batch_size` is the per-device batch size for calling `DSEngine.step`, used as self.replay_buffer.sample_batch_size,
+          but the parameters will not be necessarily updated. Gradient accumulation is handled by deepspeed.
+        + `train_batch_size` is the global batch size for a single (real) update step, utilized in DeepSpeedStrategy.
+        + `micro_rollout_batch_size` is the per-device batch size for a single generation call, used by `prompts_dataloader`.
+        + `rollout_batch_size` is the global batch size for entering `ppo_train`, or the global batch size.
+
+        In our semantics, given batch size `B`, rollout_n_mbs `Nr`, train_n_mbs `Nt`, PPO n_mbs `Np`, number of actors `W`, we have:
+        max_epochs = 1
+        train_batch_size = B // Np
+        micro_train_batch_size = B // Nt // Np // W
+        rollout_batch_size = B
+        micro_rollout_batch_size = B // Nr // W
+
+        The number of vllm generate engines must be smaller than the number of actors
+        """
         _step_cnt = 0
         last_gen_time = last_inf_time = 0
-        self.prompts_dataloader = prompts_dataloader
-        self.pretrain_dataloader = pretrain_dataloader
 
         num_rollouts_per_episodes = (
             num_update_steps_per_episodes * args.train_batch_size // args.max_epochs // args.rollout_batch_size
@@ -359,16 +377,11 @@ class PPOTrainer(ABC):
                 self.prompts_dataloader.sampler.set_epoch(
                     episode, consumed_samples=0 if episode > start_episode else consumed_samples
                 )
-            pbar = tqdm(
-                range(self.prompts_dataloader.__len__()),
-                desc=f"Episode [{episode + 1}/{args.num_episodes}]",
-                disable=not self.strategy.is_rank_0(),
-            )
 
             train_iter_tik = time.perf_counter()
             for rand_prompts in self.prompts_dataloader:
                 experience, gen_time, inf_time = self.experience_maker.make_experience(rand_prompts, **self.generate_kwargs)
-                logger.info(f"Generation sequence length: {experience.sequences.size(1)}")
+                assert experience.sequences.shape[1] == args.prompt_max_len + args.generate_max_len, (experience.sequences.shape, args.prompt_max_len + args.generate_max_len)
                 # print prompt/answer in each update step
                 # if global_step % update_timesteps == 0:
                 #     output = self.tokenizer.batch_decode(experience.sequences, skip_special_tokens=True)
@@ -376,18 +389,13 @@ class PPOTrainer(ABC):
                 last_gen_time += gen_time
                 last_inf_time += inf_time
                 self.replay_buffer.append(experience)
-                print(">>>> update timesteps", update_timesteps)
 
                 if steps % update_timesteps == 0:
-                    global_steps = steps // update_timesteps
-
-                    torch.cuda.empty_cache()
                     ts = time.perf_counter()
                     self.replay_buffer.normalize("advantages", self.strategy)
                     status = self.ppo_train()
                     _step_cnt += 1
                     self.replay_buffer.clear()
-                    torch.cuda.empty_cache()
                     # self.kl_ctl.update(status["kl"], args.rollout_batch_size)
                     # logs/checkpoints
                     # self.save_logs_and_checkpoints(args, global_step // update_timesteps, pbar, status)
@@ -401,22 +409,23 @@ class PPOTrainer(ABC):
                         args=args,
                         e2e_time=e2e_time,
                         gen_exp_time=last_gen_time,
+                        inf_time=last_inf_time,
                         train_time=train_time,
                         rank=torch.distributed.get_rank(),
                     )
                     last_gen_time = last_inf_time = 0
                     train_iter_tik = time.perf_counter()
 
-                # pbar.update()
-                global_step = global_step + 1
                 if _step_cnt >= 10:
                     if torch.distributed.get_rank() == 0:
-                        print(f">>>>>>>>>>>>>> Benchmarking finishes after {_step_cnt} steps")
-                    if self.gpu_monior_proc is not None:
-                        self.gpu_monior_proc.kill()
+                        print("=" * 100)
+                        print(f" Benchmarking finishes after {_step_cnt} steps ".center(100, "="))
+                        print("=" * 100)
+                    # if self.gpu_monior_proc is not None:
+                    #     self.gpu_monior_proc.kill()
                     return
-        if self.gpu_monior_proc is not None:
-            self.gpu_monior_proc.kill()
+        # if self.gpu_monior_proc is not None:
+        #     self.gpu_monior_proc.kill()
 
     def ppo_train(self, global_steps=0):
         # replay buffer may be empty at first, we should rebuild at each training
@@ -428,7 +437,6 @@ class PPOTrainer(ABC):
             pin_memory=self.dataloader_pin_memory,
             collate_fn=self.replay_buffer.collate_fn,
         )
-        print(f">>>>> train sample batch size {self.replay_buffer.sample_batch_size}, dataloader length {len(dataloader)}")
         device = torch.cuda.current_device()
 
         status_list = []
@@ -557,7 +565,6 @@ class PPOTrainer(ABC):
             else:
                 status[k] = v.mean().item()
         bwd_time = time.perf_counter() - t2
-        print(f">>>> Actor forward time {fwd_time:.2f}s, backward time {bwd_time:.2f}s, #seqs={experience.attention_mask.shape[0]}")
         return status
 
     def training_step_critic(self, experience: Experience) -> Dict[str, float]:
@@ -596,7 +603,6 @@ class PPOTrainer(ABC):
             "critic_lr": self.critic_scheduler.get_last_lr()[0],
         }
         bwd_t = time.perf_counter() - t2
-        print(f">>>> critic forward time {fwd_t:.2f}s, backward time {bwd_t:.2f}s, #seqs={experience.attention_mask.shape[0]}")
         return status
 
     def save_logs_and_checkpoints(self, args, global_step, step_bar, logs_dict={}, client_states={}):

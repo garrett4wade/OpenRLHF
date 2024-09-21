@@ -102,14 +102,23 @@ class NaiveExperienceMaker(ABC):
 
     # tokenizer
     def tokenize_fn(self, texts, max_length, device):
+        if self.tokenizer.pad_token_id is None:
+            self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+        self.tokenizer.padding_side = "left"
         batch = self.tokenizer(
             texts,
             return_tensors="pt",
-            add_special_tokens=False,
             max_length=max_length,
-            padding=True,
+            padding='max_length',
             truncation=True,
         )
+        # No padding. Regard them as sequences with the same length.
+        batch['attention_mask'].fill_(1)
+        input_ids = batch['input_ids']
+        _t = input_ids[0][-1]
+        input_ids[input_ids == self.tokenizer.pad_token_id] = _t
+        batch['input_ids'] = input_ids
+        assert batch['input_ids'].shape == (len(texts), max_length), f"input_ids shape: {batch['input_ids'].shape} {max_length} {len(texts)}"
         return {k: v.to(device) for k, v in batch.items()}
 
     @torch.no_grad()
@@ -123,9 +132,9 @@ class NaiveExperienceMaker(ABC):
         # generate seq
         gs = time.perf_counter()
         inputs = self.tokenize_fn(prompts, self.prompt_max_len, device="cuda")
+        assert self.tokenizer.padding_side == 'left', 'tokenizer padding_side should be left'
         sequences, attention_mask, action_mask = self.actor.generate(**inputs, **generate_kwargs)
         ge = time.perf_counter()
-        print(">>>>>>> pure generate time: {}".format(ge-gs))
         num_actions = action_mask.size(1)
 
         # log probs
@@ -162,7 +171,6 @@ class NaiveExperienceMaker(ABC):
             generate_kwargs["lambd"],
         )
         infe = time.perf_counter()
-        print(">>>>>>> pure inference time: {}".format(infe-infs))
 
         info = {
             "kl": masked_mean(kl, action_mask, dim=-1),
@@ -251,9 +259,6 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             else self._generate_vllm(prompts, **generate_kwargs)
         )
         generate_time = time.time() - start
-        if self.vllm_engines is None:
-            # otherwise printed in vllm engine
-            print(f">>>>>>>>>>>>> pure generate time: {generate_time}")
 
         num_actions = action_mask.size(1)
         sequences_cpu, attention_mask_cpu, action_mask_cpu = (
@@ -327,7 +332,6 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             generate_kwargs["gamma"],
             generate_kwargs["lambd"],
         )
-        torch.cuda.synchronize()
         inf_time = time.time() - infs
 
         info = {
@@ -379,13 +383,12 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             top_p=kwargs.get("top_p", 1.0),
             top_k=kwargs.get("top_k", -1),
             max_tokens=kwargs.get("max_new_tokens", 1024),
-            min_tokens=kwargs.get("min_new_tokens", 1),
-            skip_special_tokens=kwargs.get("skip_special_tokens", False),
+            min_tokens=kwargs.get("max_new_tokens", 1024),
         )
 
         # TODO: can't pass `max_length` to vLLM's tokenizer for input truncation, remove this once it is supported.
         input_ids = self.tokenize_fn(prompts, self.prompt_max_len, device="cpu")["input_ids"]
-        assert self.tokenizer.padding_side == "left", f"tokenizer padding_size should be left"
+        assert self.tokenizer.padding_side == "left", f"tokenizer padding_side should be left"
         pad_indices = (input_ids != self.tokenizer.pad_token_id).to(dtype=torch.int).argmax(dim=-1)
         prompt_token_ids = []
         for i, pad_index in enumerate(pad_indices.numpy()):

@@ -50,6 +50,11 @@ def get_train_ds_config(
         "bf16": {
             "enabled": bf16,
         },
+        "fp16": {
+            "enabled": not bf16,
+            "loss_scale_window": 40,
+            "initial_scale_power": 12,
+        },
         "gradient_clipping": max_norm,
         "prescale_gradients": False,
         "wall_clock_breakdown": False,
@@ -75,6 +80,11 @@ def get_eval_ds_config(
         "zero_optimization": zero_opt_dict,
         "bf16": {
             "enabled": bf16,
+        },
+        "fp16": {
+            "enabled": not bf16,
+            "loss_scale_window": 40,
+            "initial_scale_power": 12,
         },
         "gradient_clipping": 1.0,
         "prescale_gradients": False,

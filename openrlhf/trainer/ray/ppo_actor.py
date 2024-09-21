@@ -91,6 +91,7 @@ class ActorPPOTrainer(PPOTrainer):
                     "Warning: using --vllm_sync_backend=gloo for vLLM version > 0.4.2 (or export NCCL_P2P_DISABLE=1)"
                 )
 
+            assert backend == 'nccl'
             refs = [
                 engine.init_process_group.remote(
                     master_address,
@@ -114,7 +115,7 @@ class ActorPPOTrainer(PPOTrainer):
 
         torch.distributed.barrier()
 
-    def ppo_train(self, global_steps):
+    def ppo_train(self, global_steps=0):
         # 1. ensure all experience makers done
         self.experience_maker.flush()
         torch.distributed.barrier()
@@ -396,8 +397,6 @@ class ActorModelRayActor(BasePPORole):
         critic_hf_config = ray.get(critic_model.get_hf_config.remote())
         hf_actor_config = self.actor.model.module.config
         hf_actor_config._num_params = _count_params(self.actor.model.module)
-        trainer.fit(self.prompts_dataloader, self.pretrain_dataloader, args, hf_actor_config=hf_actor_config,
-                    hf_critic_config=critic_hf_config)
         # broadcast checkpoint
         ckpt_path = os.path.join(args.ckpt_path, "_actor")
         if args.load_checkpoint and os.path.exists(ckpt_path) and not vllm_engines is None:
@@ -410,6 +409,8 @@ class ActorModelRayActor(BasePPORole):
             self.pretrain_dataloader,
             self.consumed_samples,
             self.num_update_steps_per_episodes,
+            hf_actor_config=hf_actor_config,
+            hf_critic_config=critic_hf_config,
         )
 
     def save_model(self):

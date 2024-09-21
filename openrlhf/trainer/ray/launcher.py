@@ -37,7 +37,7 @@ def gpu_utilization_monitor(name, gpu_idx:int, ttl:float):
 class DistributedTorchRayActor:
     def __init__(self, name, world_size, rank, local_rank, master_addr, master_port):
         self.name = name
-        self.monitor_proc = mp.Process(target=gpu_utilization_monitor, args=(self.name, rank, 3600))
+        # self.monitor_proc = mp.Process(target=gpu_utilization_monitor, args=(self.name, rank, 3600))
         # self.monitor_proc.start()
         self._world_size = world_size
         self._rank = rank
@@ -74,12 +74,12 @@ class BasePPORole(DistributedTorchRayActor):
     def _setup_distributed(self, strategy: DeepspeedStrategy):
         # configure strategy
         self.strategy = strategy
-        print(f">>>>>>>>>>>>>>>>> {os.environ['CUDA_VISIBLE_DEVICES']}")
+        # print(f">>>>>>>>>>>>>>>>> {os.environ['CUDA_VISIBLE_DEVICES']}")
         torch.cuda.set_device(0)
         torch.distributed.init_process_group(backend='nccl')
         strategy.setup_distributed()
-        if self._rank == 0:
-            self.monitor_proc.start()
+        # if self._rank == 0:
+        #     self.monitor_proc.start()
 
     def init_model_from_pretrained(self, *args, **kwargs):
         raise NotImplementedError()

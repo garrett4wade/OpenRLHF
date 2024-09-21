@@ -114,6 +114,11 @@ def get_llm_for_sequence_regression(
     else:
         nf4_config = None
 
+    if bf16:
+        cls_class._set_default_torch_dtype(torch.bfloat16)
+    else:
+        cls_class._set_default_torch_dtype(torch.float16)
+        
     with torch.device("cuda"):
         model = cls_class(
             config=config
