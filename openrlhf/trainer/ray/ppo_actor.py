@@ -133,7 +133,7 @@ class ActorPPOTrainer(PPOTrainer):
                 torch.distributed.barrier()
                 update_weight_jobs, bcast_tik = self._broadcast_to_vllm()
                 ray.get(update_weight_jobs)
-                print(">>>>>>>>> broadcast weights to vllm engines cost: ", time.perf_counter() - bcast_tik)
+                # print(">>>>>>>>> broadcast weights to vllm engines cost: ", time.perf_counter() - bcast_tik)
         else:
             status = {}
 

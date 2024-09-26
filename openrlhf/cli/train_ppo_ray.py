@@ -1,7 +1,7 @@
 import argparse
 from datetime import datetime
 from typing import List
-
+import os
 import ray
 import torch
 from ray.util.placement_group import placement_group
@@ -334,4 +334,11 @@ if __name__ == "__main__":
         print("[Warning] {} not in args.input_template, set to None")
         args.input_template = None
 
+    envs = {"TRANSFORMERS_OFFLINE": "1",
+    "PYTORCH_KERNEL_CACHE_PATH": "/mnt/bs_fs/fw/.cache/pytorch-kernels/",
+    "TRITON_CACHE_DIR": "/mnt/bs_fs/fw/.cache/triton/",
+    "TOKENIZERS_PARALLELISM": "true",
+    "TORCH_EXTENSIONS_DIR": "/mnt/bs_fs/fw/.cache/torch-ext/",}
+    for k, v in envs.items():
+        os.environ[k] = v
     train(args)

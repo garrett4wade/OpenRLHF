@@ -183,7 +183,7 @@ class CriticModelRayActor(BasePPORole):
             value = self.critic(sequences, action_mask, attention_mask)
             if is_inference:
                 tok = time.perf_counter()
-                print(f">>>>>>>>>>>>> pure {inference_name} inference time: {tok - tik}")
+                # print(f">>>>>>>>>>>>> pure {inference_name} inference time: {tok - tik}")
         self.critic.train()  # reset model state
         return value.to("cpu")
 

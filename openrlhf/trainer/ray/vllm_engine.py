@@ -42,7 +42,7 @@ logger = init_logger(__name__)
 class LLMRayActor:
     def __init__(self, idx, *args, **kwargs):
         import vllm
-        print(">>>>>>>>>>>>>>>>", os.getenv("CUDA_VISIBLE_DEVICES"))
+        # print(">>>>>>>>>>>>>>>>", os.getenv("CUDA_VISIBLE_DEVICES"))
 
         self.__version__ = vllm.__version__
         assert self.__version__ >= "0.4.1", "OpenRLHF only supports vLLM >= 0.4.1"

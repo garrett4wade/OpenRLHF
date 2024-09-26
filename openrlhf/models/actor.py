@@ -222,7 +222,6 @@ class Actor(nn.Module):
         log_probs = log_probs_from_logits(output["logits"][:, :-1, :], sequences[:, 1:])
         if is_inference:
             tok = time.perf_counter()
-            print(f">>>>>>>>>> pure {inference_name} inference time: {tok - tik}")
 
         if return_output:
             return (log_probs[:, -num_actions:], output)

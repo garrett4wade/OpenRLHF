@@ -159,8 +159,8 @@ class RewardModelRayActor(BasePPORole):
             if is_inference:
                 tik = time.perf_counter()
             reward = self.model(sequences, attention_mask)
-            if is_inference:
-                print(f">>>>>>>>>>>> pure {inference_name} inference time: {time.perf_counter() - tik}")
+            # if is_inference:
+                # print(f">>>>>>>>>>>> pure {inference_name} inference time: {time.perf_counter() - tik}")
         return reward.to("cpu")
 
     def empty_cache(self) -> None:
