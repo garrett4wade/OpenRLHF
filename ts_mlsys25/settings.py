@@ -8,10 +8,10 @@ from typing import *
 import transformers
 
 MODEL_SIZE_TO_PATH = {
-    7: "/mnt/bs_fs/models/llama-3-8b/",
-    13: "/mnt/bs_fs/models/llama-3-13b/",
-    34: "/mnt/bs_fs/models/llama-3-34b/",
-    70: "/mnt/bs_fs/models/llama-3-70b/",
+    7: "/mnt/bs_fs/models/CodeLlama-7b-hf/",
+    13: "/mnt/bs_fs/models/CodeLlama-13b-hf/",
+    34: "/mnt/bs_fs/models/CodeLlama-34b-hf/",
+    70: "/mnt/bs_fs/models/CodeLlama-70b-hf/",
 }
 
 for v in MODEL_SIZE_TO_PATH.values():
