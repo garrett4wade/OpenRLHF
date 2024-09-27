@@ -5,13 +5,19 @@ import signal
 import subprocess
 from pathlib import Path
 from typing import *
+import transformers
 
 MODEL_SIZE_TO_PATH = {
-    7: "/mnt/bs_fs/models/CodeLlama-7b-hf/",
-    13: "/mnt/bs_fs/models/CodeLlama-13b-hf/",
-    34: "/mnt/bs_fs/models/CodeLlama-34b-hf/",
-    70: "/mnt/bs_fs/models/CodeLlama-70b-hf/",
+    7: "/mnt/bs_fs/models/llama-3-8b/",
+    13: "/mnt/bs_fs/models/llama-3-13b/",
+    34: "/mnt/bs_fs/models/llama-3-34b/",
+    70: "/mnt/bs_fs/models/llama-3-70b/",
 }
+
+for v in MODEL_SIZE_TO_PATH.values():
+    _ = transformers.AutoConfig.from_pretrained(v)
+    _ = transformers.AutoTokenizer.from_pretrained(v)
+
 
 MODEL_SIZE_TO_N_NODES_BAISC = {7: 2, 13: 4, 34: 8, 70: 16}
 # Since openrlhf round-robinly assign actors to vllm engines,
@@ -19,7 +25,9 @@ MODEL_SIZE_TO_N_NODES_BAISC = {7: 2, 13: 4, 34: 8, 70: 16}
 # With N GPUs, we have N//4 actors on N//4 GPUs and N//2 GPUs for vllm engines,
 # so the minimum TP size should be 2.
 MODEL_SIZE_TO_VLLM_TP_SIZE = {7: 2, 13: 2, 34: 2, 70: 4}
+N_NODES_TO_BATCH_SIZE = {2: 512, 4: 1024, 8: 2048, 16: 4096}
 
+CTX, PROMPT_LEN = 2048, 1024
 
 def build_cmd(
     model_size: int,

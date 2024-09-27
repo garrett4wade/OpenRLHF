@@ -77,6 +77,8 @@ def _parselog(
                     time_records.append(step_time)
                     tflops = float(line.split("TFLOPs: ")[1].split(",")[0])
                     tflops_records.append(tflops)
+                if "Benchmarking finishes" in line:
+                    oom = False
     except FileNotFoundError:
         # print(f"File not found: {logpath}")
         return False, oom
@@ -118,7 +120,7 @@ def _parselog(
     )
     for k, v in d.items():
         benchmark_db[k].append(v)
-    return True, False
+    return True, oom
 
 
 def parselog(actor_size: int, critic_size: int, gpu_scale_factor: int):

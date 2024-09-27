@@ -416,6 +416,7 @@ class PPOTrainer(ABC):
                     last_gen_time = last_inf_time = 0
                     train_iter_tik = time.perf_counter()
 
+                steps += 1
                 if _step_cnt >= 3:
                     if torch.distributed.get_rank() == 0:
                         print("=" * 100)
