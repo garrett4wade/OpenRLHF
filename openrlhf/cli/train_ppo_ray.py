@@ -133,6 +133,7 @@ def train(args):
     refs = []
     refs.extend(ref_model.async_init_model_from_pretrained(strategy, args.pretrain))
     refs.extend(actor_model.async_init_model_from_pretrained(strategy, args.pretrain))
+    refs.extend(critic_model.async_init_model_from_pretrained(strategy, args.critic_pretrain, 10000))
     if not args.remote_rm_url:
         for reward_model, reward_pretrain in zip(reward_models, reward_pretrains):
             refs.extend(reward_model.async_init_model_from_pretrained(strategy, reward_pretrain))
@@ -152,8 +153,6 @@ def train(args):
 
     # critic scheduler initialization depends on max_step, so we have to init critic after actor
     # TODO: use first reward model as critic model
-    max_steps = ray.get(actor_model._actor_handlers[0].max_steps.remote())
-    refs.extend(critic_model.async_init_model_from_pretrained(strategy, args.critic_pretrain, max_steps))
     ray.get(refs)
 
     # train actor and critic mdoel
@@ -335,10 +334,11 @@ if __name__ == "__main__":
         args.input_template = None
 
     envs = {"TRANSFORMERS_OFFLINE": "1",
-    "PYTORCH_KERNEL_CACHE_PATH": "/mnt/bs_fs/fw/.cache/pytorch-kernels/",
-    "TRITON_CACHE_DIR": "/mnt/bs_fs/fw/.cache/triton/",
+    # "PYTORCH_KERNEL_CACHE_PATH": "/mnt/bs_fs/fw/.cache/pytorch-kernels/",
+    # "TRITON_CACHE_DIR": "/mnt/bs_fs/fw/.cache/triton/",
     "TOKENIZERS_PARALLELISM": "true",
-    "TORCH_EXTENSIONS_DIR": "/mnt/bs_fs/fw/.cache/torch-ext/",}
+    # "TORCH_EXTENSIONS_DIR": "/mnt/bs_fs/fw/.cache/torch-ext/",
+    }
     for k, v in envs.items():
         os.environ[k] = v
     train(args)

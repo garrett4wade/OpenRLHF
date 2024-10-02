@@ -68,12 +68,12 @@ class Actor(nn.Module):
 
             assert os.path.exists(pretrain_or_model)
             config = transformers.AutoConfig.from_pretrained(pretrain_or_model, trust_remote_code=True)
-            with torch.device("cuda"):
-                self.model = AutoModelForCausalLM.from_config(
-                    config,
-                    attn_implementation=attn_implementation,
-                    torch_dtype=torch.bfloat16 if bf16 else torch.float16,
-                )
+            # with torch.device("cuda"):
+            self.model = AutoModelForCausalLM.from_config(
+                config,
+                attn_implementation=attn_implementation,
+                torch_dtype=torch.bfloat16 if bf16 else torch.float16,
+            )
 
             # LoRA
             if lora_rank > 0:

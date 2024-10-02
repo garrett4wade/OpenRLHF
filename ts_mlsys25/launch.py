@@ -4,6 +4,7 @@ import math
 import os
 import subprocess
 import re
+import time
 import os
 from settings import build_cmd, run_interruptable_cmd_on_js_h100, MODEL_SIZE_TO_N_NODES_BAISC, N_NODES_TO_BATCH_SIZE, CTX, PROMPT_LEN
 from parse_log import _parselog
@@ -70,8 +71,10 @@ def main(args):
                 s, e = extract_node_integers(args.nodelist)
                 assert e -s + 1 == MODEL_SIZE_TO_N_NODES_BAISC[size]
                 os.system(f"python3 /mnt/bs_fs/rayc.py stop -s {s} -e {e}")
+                time.sleep(10)
                 run_interruptable_cmd_on_js_h100(cmd, args.nodelist, logfile)
                 os.system(f"python3 /mnt/bs_fs/rayc.py stop -s {s} -e {e}")
+                time.sleep(10)
 
                 parse_success, oom = _parselog(
                     actor_size=size,

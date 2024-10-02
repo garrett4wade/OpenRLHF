@@ -5,8 +5,9 @@ import torch
 import torch.nn as nn
 from peft import LoraConfig, get_peft_model
 from peft.tuners.lora import LoraLayer
+import time
 from transformers import AutoConfig, AutoModel, BitsAndBytesConfig
-from transformers.deepspeed import HfDeepSpeedConfig
+from transformers.deepspeed import HfDeepSpeedConfig, is_deepspeed_zero3_enabled, deepspeed_init, deepspeed_config
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
 from openrlhf.utils.logging_utils import init_logger
@@ -119,10 +120,20 @@ def get_llm_for_sequence_regression(
     else:
         cls_class._set_default_torch_dtype(torch.float16)
         
-    with torch.device("cuda"):
-        model = cls_class(
-            config=config
-        )
+    # with torch.device("cuda"):
+    tik = time.perf_counter()
+    print("////////////// 111111111", flush=True)
+    assert is_deepspeed_zero3_enabled()
+    logger.info("Detected DeepSpeed ZeRO-3: activating zero.init() for this model")
+    # this immediately partitions the model across all gpus, to avoid the overhead in time
+    # and memory copying it on CPU or each GPU first
+    with deepspeed.zero.Init(config_dict_or_path=deepspeed_config()):
+        model = cls_class(config)
+    # model = cls_class(
+    #     config=config
+    # )
+    print("////////////// 2222222222", time.perf_counter() - tik, flush=True)
+
 
     # LoRA
     if lora_rank > 0:
