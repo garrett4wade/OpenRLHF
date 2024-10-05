@@ -113,7 +113,7 @@ def main():
             for nr, nt in itertools.product(factors, factors):
                 parse_success, oom = _parselog(
                     actor_size=size,
-                    critic_size=7 if not scale_both else size,
+                    critic_size=7 if not scale_both else 13,
                     bs=N_NODES_TO_BATCH_SIZE[MODEL_SIZE_TO_N_NODES_BAISC[size]],
                     ctx=CTX,
                     prompt_len=PROMPT_LEN,

@@ -45,13 +45,13 @@ def main(args):
 
     for size in args.model_size:
         bs = N_NODES_TO_BATCH_SIZE[MODEL_SIZE_TO_N_NODES_BAISC[size]]
-        for train_n_mbs, rollout_n_mbs in [(1,1),(1,2),(1,4),(2,1),(2,2),(2,4),(4,1),(4,2),(4,4),(1,8),(2,8),(4,8),(8,8)]:
+        for train_n_mbs, rollout_n_mbs in [(1,2),(2,2),(2,4),(4,1),(4,2),(4,4),(1,8),(2,8),(4,8),(8,8)]:
             xx = build_cmd(size, bs, ctx, prompt_len, args.scale_both, rollout_n_mbs, train_n_mbs)
             if xx is not None:
                 cmd, logfile = xx
                 parse_success, oom = _parselog(
                     actor_size=size,
-                    critic_size=7 if not args.scale_both else size,
+                    critic_size=7 if not args.scale_both else 13,
                     bs=bs,
                     ctx=ctx,
                     prompt_len=prompt_len,
@@ -78,7 +78,7 @@ def main(args):
 
                 parse_success, oom = _parselog(
                     actor_size=size,
-                    critic_size=7 if not args.scale_both else size,
+                    critic_size=7 if not args.scale_both else 13,
                     bs=bs,
                     ctx=ctx,
                     prompt_len=prompt_len,

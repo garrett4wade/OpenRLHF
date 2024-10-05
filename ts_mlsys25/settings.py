@@ -39,7 +39,7 @@ def build_cmd(
     train_n_mbs: int,
     n_ppo_mbs=8,
 ):
-    critic_size = model_size if scale_both else 7
+    critic_size = 13 if scale_both else 7
     exp_name = "mlsys"
     trial_name = f"a{model_size}c{critic_size}b{bs}ct{ctx}p{prompt_len}nr{rollout_n_mbs}nt{train_n_mbs}"
     logfile = Path("/mnt/bs_fs/openrlhf-logs") / exp_name / trial_name / "output.log"
