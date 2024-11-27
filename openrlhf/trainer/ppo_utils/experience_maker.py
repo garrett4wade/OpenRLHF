@@ -112,7 +112,12 @@ class NaiveExperienceMaker(ABC):
             padding='max_length',
             truncation=True,
         )
+        # No padding. Regard them as sequences with the same length.
         batch['attention_mask'].fill_(1)
+        input_ids = batch['input_ids']
+        _t = input_ids[0][-1]
+        input_ids[input_ids == self.tokenizer.pad_token_id] = _t
+        batch['input_ids'] = input_ids
         assert batch['input_ids'].shape == (len(texts), max_length), f"input_ids shape: {batch['input_ids'].shape} {max_length} {len(texts)}"
         return {k: v.to(device) for k, v in batch.items()}
 
@@ -327,7 +332,6 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             generate_kwargs["gamma"],
             generate_kwargs["lambd"],
         )
-        torch.cuda.synchronize()
         inf_time = time.time() - infs
 
         info = {
@@ -379,8 +383,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             top_p=kwargs.get("top_p", 1.0),
             top_k=kwargs.get("top_k", -1),
             max_tokens=kwargs.get("max_new_tokens", 1024),
-            min_tokens=kwargs.get("min_new_tokens", 1),
-            skip_special_tokens=kwargs.get("skip_special_tokens", False),
+            min_tokens=kwargs.get("max_new_tokens", 1024),
         )
 
         # TODO: can't pass `max_length` to vLLM's tokenizer for input truncation, remove this once it is supported.

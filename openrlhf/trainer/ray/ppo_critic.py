@@ -122,6 +122,8 @@ class CriticModelRayActor(BasePPORole):
             )
 
         # prepare models/optimizers...
+        assert strategy.args.critic_micro_train_batch_size is not None
+        strategy.micro_train_batch_size = strategy.args.critic_micro_train_batch_size
         self.critic, self.critic_optim, self.critic_scheduler = strategy.prepare(
             (critic, critic_optim, critic_scheduler),
             is_rlhf=True,

@@ -74,7 +74,7 @@ class BasePPORole(DistributedTorchRayActor):
     def _setup_distributed(self, strategy: DeepspeedStrategy):
         # configure strategy
         self.strategy = strategy
-        print(f">>>>>>>>>>>>>>>>> {os.environ['CUDA_VISIBLE_DEVICES']}")
+        # print(f">>>>>>>>>>>>>>>>> {os.environ['CUDA_VISIBLE_DEVICES']}")
         torch.cuda.set_device(0)
         torch.distributed.init_process_group(backend='nccl')
         strategy.setup_distributed()

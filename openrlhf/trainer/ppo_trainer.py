@@ -341,12 +341,14 @@ class PPOTrainer(ABC):
         + `micro_rollout_batch_size` is the per-device batch size for a single generation call, used by `prompts_dataloader`.
         + `rollout_batch_size` is the global batch size for entering `ppo_train`, or the global batch size.
 
-        In our semantics, given batch size `B`, rollout_n_mbs `Nr`, train_n_mbs `Nt`, PPO n_mbs `Np`, and world size `W`, we have:
+        In our semantics, given batch size `B`, rollout_n_mbs `Nr`, train_n_mbs `Nt`, PPO n_mbs `Np`, number of actors `W`, we have:
         max_epochs = 1
         train_batch_size = B // Np
         micro_train_batch_size = B // Nt // Np // W
         rollout_batch_size = B
         micro_rollout_batch_size = B // Nr // W
+
+        The number of vllm generate engines must be smaller than the number of actors
         """
         _step_cnt = 0
         last_gen_time = last_inf_time = 0

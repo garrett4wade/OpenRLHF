@@ -1,7 +1,6 @@
 deepspeed --module openrlhf.cli.train_ppo \
    --pretrain /lustre/public/pretrained_model_weights/llama2/Llama-2-7b-hf/ \
    --reward_pretrain /lustre/public/pretrained_model_weights/llama2/Llama-2-7b-hf/ \
-   --logging_steps 1 \
    --micro_train_batch_size 1 \
    --train_batch_size 8 \
    --micro_rollout_batch_size 8 \
@@ -11,7 +10,6 @@ deepspeed --module openrlhf.cli.train_ppo \
    --zero_stage 2 \
    --init_kl_coef 0.01 \
    --input_key prompt \
-   --max_samples 100000 \
    --normalize_reward \
    --adam_offload \
    --flash_attn \
