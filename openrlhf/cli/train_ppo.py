@@ -209,8 +209,6 @@ def train(args):
         consumed_samples = states["consumed_samples"]
         strategy.print(f"Loaded the checkpoint: {args.ckpt_path}, consumed_samples: {consumed_samples}")
 
-    os.makedirs(args.save_path, exist_ok=True)
-
     # configure Trainer
     trainer = PPOTrainer(
         strategy,
@@ -241,7 +239,7 @@ def train(args):
         # fro GPT generation
         do_sample=True,
         max_new_tokens=args.generate_max_len,
-        max_length=args.max_len,
+        min_new_tokens=args.generate_max_len,
         temperature=args.temperature,
         top_p=args.top_p,
         pad_token_id=tokenizer.pad_token_id,
@@ -251,21 +249,6 @@ def train(args):
     )
 
     trainer.fit(args, prompts_dataloader, pretrain_dataloader, consumed_samples, num_update_steps_per_episodes)
-
-    # save model checkpoint after fitting on only rank0
-    strategy.save_model(
-        ema_model if args.enable_ema else actor,
-        tokenizer,
-        args.save_path,
-    )
-
-    if args.save_value_network:
-        strategy.save_model(
-            critic,
-            tokenizer,
-            args.save_path + "_critic",
-        )
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -296,6 +279,7 @@ if __name__ == "__main__":
     parser.add_argument("--lambd", type=float, default=0.95, help="PPO GAE lambd")
     parser.add_argument("--gamma", type=float, default=1, help="PPO GAE gamma")
     parser.add_argument("--micro_train_batch_size", type=int, default=4, help="batch size per GPU")
+    parser.add_argument("--critic_micro_train_batch_size", type=int, default=4, help="batch size per GPU")
     parser.add_argument("--train_batch_size", type=int, default=128, help="Global training batch size")
     parser.add_argument("--normalize_reward", action="store_true", default=False, help="Enable Reward Normazation")
     parser.add_argument("--top_p", type=float, default=1.0)
@@ -343,7 +327,7 @@ if __name__ == "__main__":
     parser.add_argument("--value_head_prefix", type=str, default="value_head")
 
     # Custom dataset
-    parser.add_argument("--prompt_data", type=str, default=None, help="HF dataset name or path")
+    parser.add_argument("--prompt_data", type=str, default=".data/ppo_prompt.jsonl", help="HF dataset name or path")
     parser.add_argument(
         "--prompt_data_probs",
         type=str,
