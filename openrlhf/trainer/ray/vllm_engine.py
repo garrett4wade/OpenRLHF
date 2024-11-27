@@ -43,6 +43,7 @@ class LLMRayActor:
     def __init__(self, idx, *args, **kwargs):
         import vllm
         print(">>>>>>>>>>>>>>>>", os.getenv("CUDA_VISIBLE_DEVICES"))
+        # print(">>>>>>>>>>>>>>>>", os.getenv("CUDA_VISIBLE_DEVICES"))
 
         self.__version__ = vllm.__version__
         assert self.__version__ >= "0.4.1", "OpenRLHF only supports vLLM >= 0.4.1"
@@ -74,9 +75,9 @@ class LLMRayActor:
 
         self.llm = vllm.LLM(*args, **kwargs)
 
-        if idx == 0:
-            self._gpu_monitor_proc = mp.Process(target=gpu_utilization_monitor, args=(f"vLLM", idx, 7200))
-            self._gpu_monitor_proc.start()
+        # if idx == 0:
+        #     self._gpu_monitor_proc = mp.Process(target=gpu_utilization_monitor, args=(f"vLLM", idx, 7200))
+        #     self._gpu_monitor_proc.start()
 
     def generate(self, *args, **kwargs):
         return self.llm.generate(*args, **kwargs)

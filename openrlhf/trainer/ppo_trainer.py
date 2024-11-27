@@ -327,9 +327,9 @@ class PPOTrainer(ABC):
             hf_critic_config._num_params = _count_params(self.experience_maker.critic)
             n_actor_gpus = n_critic_gpus = torch.distributed.get_world_size()
             # launch monitor process for non-ray training
-            if self.gpu_monior_proc is None:
-                self.gpu_monior_proc = mp.Process(target=gpu_utilization_monitor, args=(torch.cuda.current_device(), 3600))
-                self.gpu_monior_proc.start()
+            # if self.gpu_monior_proc is None:
+            #     self.gpu_monior_proc = mp.Process(target=gpu_utilization_monitor, args=(torch.cuda.current_device(), 3600))
+            #     self.gpu_monior_proc.start()
 
         """
         Notes by Wei:
@@ -416,16 +416,17 @@ class PPOTrainer(ABC):
                     last_gen_time = last_inf_time = 0
                     train_iter_tik = time.perf_counter()
 
+                steps += 1
                 if _step_cnt >= 10:
                     if torch.distributed.get_rank() == 0:
                         print("=" * 100)
                         print(f" Benchmarking finishes after {_step_cnt} steps ".center(100, "="))
                         print("=" * 100)
-                    if self.gpu_monior_proc is not None:
-                        self.gpu_monior_proc.kill()
+                    # if self.gpu_monior_proc is not None:
+                    #     self.gpu_monior_proc.kill()
                     return
-        if self.gpu_monior_proc is not None:
-            self.gpu_monior_proc.kill()
+        # if self.gpu_monior_proc is not None:
+        #     self.gpu_monior_proc.kill()
 
     def ppo_train(self, global_steps=0):
         # replay buffer may be empty at first, we should rebuild at each training

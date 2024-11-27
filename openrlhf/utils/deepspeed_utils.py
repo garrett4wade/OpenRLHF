@@ -20,6 +20,7 @@ def get_train_ds_config(
     grad_accum_dtype=None,
     disable_trace_cache=False,
 ):
+    assert stage == 3
     device = "cpu" if offload else "none"
     zero_opt_dict = {
         "stage": stage,
@@ -67,6 +68,7 @@ def get_eval_ds_config(
     stage=0,
     bf16=True,
 ):
+    assert stage == 3
     zero_opt_dict = {
         "stage": stage,
         "stage3_param_persistence_threshold": "auto",

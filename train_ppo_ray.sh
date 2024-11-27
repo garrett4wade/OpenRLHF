@@ -13,8 +13,8 @@ python3 -m openrlhf.cli.train_ppo_ray \
    --colocate_critic_reward \
    --colocate_actor_ref \
    --ref_reward_offload \
-   --pretrain /lustre/public/pretrained_model_weights/llama2/Llama-2-7b-hf-config-only \
-   --reward_pretrain /lustre/public/pretrained_model_weights/llama2/Llama-2-7b-hf-config-only \
+   --pretrain /mnt/bs_fs/models/CodeLlama-7b-hf/ \
+   --reward_pretrain /mnt/bs_fs/models/CodeLlama-7b-hf/ \
    --micro_train_batch_size 4 \
    --critic_micro_train_batch_size 4 \
    --train_batch_size 8 \

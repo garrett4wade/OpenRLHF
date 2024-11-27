@@ -37,7 +37,7 @@ def gpu_utilization_monitor(name, gpu_idx:int, ttl:float):
 class DistributedTorchRayActor:
     def __init__(self, name, world_size, rank, local_rank, master_addr, master_port):
         self.name = name
-        self.monitor_proc = mp.Process(target=gpu_utilization_monitor, args=(self.name, rank, 3600))
+        # self.monitor_proc = mp.Process(target=gpu_utilization_monitor, args=(self.name, rank, 3600))
         # self.monitor_proc.start()
         self._world_size = world_size
         self._rank = rank
@@ -78,8 +78,8 @@ class BasePPORole(DistributedTorchRayActor):
         torch.cuda.set_device(0)
         torch.distributed.init_process_group(backend='nccl')
         strategy.setup_distributed()
-        if self._rank == 0:
-            self.monitor_proc.start()
+        # if self._rank == 0:
+        #     self.monitor_proc.start()
 
     def init_model_from_pretrained(self, *args, **kwargs):
         raise NotImplementedError()
@@ -159,8 +159,8 @@ class RewardModelRayActor(BasePPORole):
             if is_inference:
                 tik = time.perf_counter()
             reward = self.model(sequences, attention_mask)
-            if is_inference:
-                print(f">>>>>>>>>>>> pure {inference_name} inference time: {time.perf_counter() - tik}")
+            # if is_inference:
+                # print(f">>>>>>>>>>>> pure {inference_name} inference time: {time.perf_counter() - tik}")
         return reward.to("cpu")
 
     def empty_cache(self) -> None:
